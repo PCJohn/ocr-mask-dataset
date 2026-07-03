@@ -21,10 +21,10 @@ REGISTRY = {}
 def _lazy_registry():
     if REGISTRY:
         return REGISTRY
-    from src.datasets import funsd, cord, sroie
-    REGISTRY["funsd"] = funsd
+    from src.datasets import cord, naf, publaynet
     REGISTRY["cord"] = cord
-    REGISTRY["sroie"] = sroie
+    REGISTRY["naf"] = naf
+    REGISTRY["publaynet"] = publaynet
     return REGISTRY
 
 
@@ -50,8 +50,8 @@ def process_dataset(name: str, out_dir: str, limit: int = None) -> str:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--datasets", nargs="+", default=["funsd", "cord", "sroie"],
-                    choices=["funsd", "cord", "sroie"])
+    p.add_argument("--datasets", nargs="+", default=["cord", "naf", "publaynet"],
+                    choices=["cord", "naf", "publaynet"])
     p.add_argument("--out_dir", default="data/processed")
     p.add_argument("--limit", type=int, default=None,
                     help="cap number of samples per dataset (useful for a quick smoke test)")
