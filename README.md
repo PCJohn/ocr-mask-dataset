@@ -33,6 +33,40 @@ here.
 | 5 | [SynSlides](https://huggingface.co/datasets/NerdyVisky/SynSlides) ([paper](https://arxiv.org/abs/2506.23605)) | **synthetic lecture slides** — closest automatic/commercial-clean stand-in for slideshows/lecture-video-frames | ~544 MB | element bounding boxes (title, body text, bullets, equations, tables, etc.) | MIT | HF `datasets`, auto |
 | 6 | [BSTD (Bharat Scene Text Dataset)](https://github.com/Bhashini-IITJ/BharatSceneTextDataset) ([paper](https://arxiv.org/abs/2511.23071)) | real photographed scene text: signboards, billboards, bus stops, ATMs — **11 Indian languages + English** | ~17 GB, single zip (no partial download) | word-level polygons | Apache-2.0 repo/annotations; images are CC BY-SA 4.0 (Wikimedia Commons) ⚠️ share-alike | Google Drive public link via `gdown`, auto — **opt-in only**, not in the default dataset list (size) |
 | 7 | [DocLayNet](https://github.com/DS4SD/DocLayNet) (via [pierreguillou/DocLayNet-base](https://huggingface.co/datasets/pierreguillou/DocLayNet-base) mirror) | real scanned/digital documents: financial reports, manuals, scientific articles, laws, patents, tenders | ~691 train images (small on purpose) | **line-level boxes** (`bboxes_line`) — a step up in granularity from PubLayNet/SynSlides | CDLA-Permissive-1.0 | HF `datasets`, auto, but uses a custom loading script (`trust_remote_code=True`) — **opt-in only**, unverified from this sandboxed environment |
+| 8 | [NVIDIA OCR-Synthetic-Multilingual-v1](https://huggingface.co/datasets/nvidia/OCR-Synthetic-Multilingual-v1) | **synthetic** rendered text — **Japanese, Korean, Russian, Chinese (Simplified + Traditional), English** | full dataset is 5.45TB across millions of samples/language, but we only pull one small shard per language (a few thousand samples each) via direct HF file downloads | genuine **word- and line-level quad polygons** (not block-level) | CC BY 4.0 | HF Hub direct file download (`hf_hub_download`), auto — **opt-in only** (synthetic, not real photos/scans, and you should pick which languages you actually want) |
+
+## Language coverage, updated
+
+You also asked about Chinese/Japanese/Korean, European languages, Russian,
+Urdu, Farsi. Here's what actually panned out:
+
+- **Chinese, Japanese, Korean, Russian**: covered by **#8, NVIDIA
+  OCR-Synthetic-Multilingual-v1** — genuinely the best-fit find here, CC BY
+  4.0, real word/line-level quads (not block-level), auto-downloadable per
+  shard. The catch: it's **synthetic** (rendered text on backgrounds via a
+  SynthDoG-style pipeline), not real photographed/scanned content — treat it
+  as a complement to the real-world datasets above, not a substitute, the
+  same way SynSlides complements rather than replaces real lecture footage.
+- **European languages** (French, German, Spanish, Italian, etc.): no
+  dedicated dataset found that's commercially licensed, auto-downloadable,
+  and specifically targets these — they're likely present incidentally in
+  general-purpose datasets like PubLayNet/TextOCR (Latin-script Western
+  content sometimes appears) but not annotated *as* a specific European
+  language. Didn't find a gap-filler worth adding here.
+- **Urdu**: the closest options I found (Cursive-Text Urdu scene-text
+  dataset) are **CC BY-NC-ND** — non-commercial, excluded by this project's
+  rules. Nothing commercially-licensed and auto-downloadable turned up.
+- **Farsi/Persian**: similarly, what exists (IDPL-PFOD, PESTD) doesn't have
+  a clearly stated commercial-permitting license I could verify. Nothing
+  added.
+- **Arabic** (not on your list, but related script family): there IS a
+  genuinely good one — [Humans in the Loop's Arabic Documents OCR
+  dataset](https://humansintheloop.org/resources/datasets/arabic-documents-ocr-dataset/),
+  10K images, line-level boxes, **CC0 1.0** (public domain, the most
+  permissive license possible). It doesn't qualify for this repo's "fully
+  automatic, no login" bar as-is — it's distributed via Kaggle, which
+  requires a (free) Kaggle account/API key, same tier of friction as SROIE.
+  Worth doing manually if Arabic matters to you; not wired in here.
 
 ### One I looked at and rejected: IndicDLP
 
@@ -201,6 +235,7 @@ will learn:
 | PubLayNet | **block/paragraph-level, not line-level** | yes — filters to `text`/`title`/`list` category ids, excludes `figure` always, excludes `table` by default (see `TEXT_CATEGORY_IDS` in `src/datasets/publaynet.py`) |
 | SynSlides | **element-level, not line-level** | yes — filters annotation category *names* against an include/exclude keyword list (`src/datasets/synslides.py`), since this dataset's exact category schema wasn't independently verified from this environment |
 | DocLayNet | **line-level** (genuinely fine-grained, not a heuristic fix) | yes — excludes `Picture` always, excludes `Table` by default |
+| NVIDIA multilingual | **word/line-level quads** (genuinely fine-grained) | n/a — pure text dataset, but synthetic not real |
 
 Two distinct problems were found and fixed here:
 1. **A real bug**: both PubLayNet and SynSlides annotate *all* layout elements
