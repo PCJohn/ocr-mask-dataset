@@ -23,13 +23,14 @@ REGISTRY = {}
 def _lazy_registry():
     if REGISTRY:
         return REGISTRY
-    from src.datasets import cord, naf, publaynet, textocr, synslides, bstd
+    from src.datasets import cord, naf, publaynet, textocr, synslides, bstd, doclaynet
     REGISTRY["cord"] = cord
     REGISTRY["naf"] = naf
     REGISTRY["publaynet"] = publaynet
     REGISTRY["textocr"] = textocr
     REGISTRY["synslides"] = synslides
     REGISTRY["bstd"] = bstd
+    REGISTRY["doclaynet"] = doclaynet
     return REGISTRY
 
 
@@ -80,8 +81,9 @@ def process_dataset(name: str, out_dir: str, limit: int = None, shuffle: bool = 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--datasets", nargs="+", default=["cord", "naf", "publaynet", "textocr", "synslides"],
-                    choices=["cord", "naf", "publaynet", "textocr", "synslides", "bstd"],
-                    help="bstd (multilingual Indian scene text) isn't in the default set -- it's a ~17GB download, opt in explicitly")
+                    choices=["cord", "naf", "publaynet", "textocr", "synslides", "bstd", "doclaynet"],
+                    help="bstd (multilingual Indian scene text, ~17GB) and doclaynet (custom loading "
+                         "script, unverified from this environment) aren't in the default set -- opt in explicitly")
     p.add_argument("--out_dir", default="data/processed")
     p.add_argument("--limit", type=int, default=None,
                     help="cap number of samples per dataset (useful for a quick smoke test)")

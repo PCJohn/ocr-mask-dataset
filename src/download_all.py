@@ -12,9 +12,10 @@ import argparse
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--datasets", nargs="+", default=["cord", "naf", "textocr", "synslides"],
-                    choices=["cord", "naf", "textocr", "synslides", "bstd"],
+                    choices=["cord", "naf", "textocr", "synslides", "bstd", "doclaynet"],
                     help="publaynet is streamed on demand, nothing to pre-download. "
-                         "bstd (multilingual Indian scene text, ~17GB) isn't in the default set -- pass it explicitly")
+                         "bstd (multilingual Indian scene text, ~17GB) and doclaynet (custom loading "
+                         "script, unverified from this environment) aren't in the default set -- pass explicitly")
     args = p.parse_args()
 
     if "cord" in args.datasets:
@@ -42,8 +43,13 @@ def main():
         from src.datasets import bstd
         bstd.download()
 
+    if "doclaynet" in args.datasets:
+        print("\n=== DocLayNet (real documents, line-level boxes) ===")
+        from src.datasets import doclaynet
+        list(doclaynet.iter_samples())  # caches via HF `datasets` on first load
+
     print("\nAll requested datasets downloaded. Now run:")
-    print("  python -m src.build_dataset --datasets cord naf textocr synslides publaynet [bstd]")
+    print("  python -m src.build_dataset --datasets cord naf textocr synslides publaynet [bstd] [doclaynet]")
 
 
 if __name__ == "__main__":

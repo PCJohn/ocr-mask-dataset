@@ -32,6 +32,21 @@ here.
 | 4 | [TextOCR](https://textvqa.org/textocr/) | natural scene text: signboards, product labels, street scenes — arbitrary shapes/sizes | ~6.5 GB (single zip, not shardable) | arbitrary-shape polygons | CC BY 4.0 | direct HTTPS zip from Meta's public file server, auto |
 | 5 | [SynSlides](https://huggingface.co/datasets/NerdyVisky/SynSlides) ([paper](https://arxiv.org/abs/2506.23605)) | **synthetic lecture slides** — closest automatic/commercial-clean stand-in for slideshows/lecture-video-frames | ~544 MB | element bounding boxes (title, body text, bullets, equations, tables, etc.) | MIT | HF `datasets`, auto |
 | 6 | [BSTD (Bharat Scene Text Dataset)](https://github.com/Bhashini-IITJ/BharatSceneTextDataset) ([paper](https://arxiv.org/abs/2511.23071)) | real photographed scene text: signboards, billboards, bus stops, ATMs — **11 Indian languages + English** | ~17 GB, single zip (no partial download) | word-level polygons | Apache-2.0 repo/annotations; images are CC BY-SA 4.0 (Wikimedia Commons) ⚠️ share-alike | Google Drive public link via `gdown`, auto — **opt-in only**, not in the default dataset list (size) |
+| 7 | [DocLayNet](https://github.com/DS4SD/DocLayNet) (via [pierreguillou/DocLayNet-base](https://huggingface.co/datasets/pierreguillou/DocLayNet-base) mirror) | real scanned/digital documents: financial reports, manuals, scientific articles, laws, patents, tenders | ~691 train images (small on purpose) | **line-level boxes** (`bboxes_line`) — a step up in granularity from PubLayNet/SynSlides | CDLA-Permissive-1.0 | HF `datasets`, auto, but uses a custom loading script (`trust_remote_code=True`) — **opt-in only**, unverified from this sandboxed environment |
+
+### One I looked at and rejected: IndicDLP
+
+[IndicDLP](https://indicdlp.github.io/) would have been an excellent fit on
+paper — 119,806 manually-annotated document images across **11 Indic
+languages + English**, spanning 12 domains including forms, newspapers,
+notices, and textbooks (real overlap with your "scanned documents" and
+"forms" use cases, and multilingual to boot). It doesn't make the cut here
+because its HF mirrors (`IndicDLP/IndicDLP-dataset`, `ai4bharat/indicdlp`)
+are **gated** — "Log in or Sign Up to review the conditions and access this
+dataset content" — which fails the "fully automatic, no login" bar, and its
+license isn't stated plainly enough on the gated page for me to confirm
+commercial use is clearly permitted. Worth revisiting if the gating/license
+situation changes; not included for now.
 
 ## Language coverage — none of these are multilingual except BSTD
 
@@ -185,6 +200,7 @@ will learn:
 | BSTD | word-level | n/a — pure text dataset |
 | PubLayNet | **block/paragraph-level, not line-level** | yes — filters to `text`/`title`/`list` category ids, excludes `figure` always, excludes `table` by default (see `TEXT_CATEGORY_IDS` in `src/datasets/publaynet.py`) |
 | SynSlides | **element-level, not line-level** | yes — filters annotation category *names* against an include/exclude keyword list (`src/datasets/synslides.py`), since this dataset's exact category schema wasn't independently verified from this environment |
+| DocLayNet | **line-level** (genuinely fine-grained, not a heuristic fix) | yes — excludes `Picture` always, excludes `Table` by default |
 
 Two distinct problems were found and fixed here:
 1. **A real bug**: both PubLayNet and SynSlides annotate *all* layout elements
