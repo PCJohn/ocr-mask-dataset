@@ -5,3 +5,4 @@ requests
 tqdm
 datasets>=2.14.0
 huggingface_hub
+gdown

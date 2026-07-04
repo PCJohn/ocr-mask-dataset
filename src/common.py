@@ -19,6 +19,7 @@ class Sample:
     sample_id: str
     image: Image.Image
     polygons: List[np.ndarray] = field(default_factory=list)  # list of (N,2) int arrays, pixel coords in `image`
+    coarse: bool = False  # True if polygons are whole text-block/element boxes rather than word/line-level
 
 
 def resize_keep_aspect(img: Image.Image, max_side: int = MAX_IMAGE_SIDE) -> Tuple[Image.Image, float]:
@@ -40,6 +41,55 @@ def rasterize_mask(polygons: Sequence[np.ndarray], size_wh: Tuple[int, int]) -> 
     return mask
 
 
+def _refine_block_to_strokes(gray_crop: np.ndarray) -> np.ndarray:
+    """Given a grayscale crop covering one coarse text-block box, shrink it down to
+    the actual dark/light text strokes inside via Otsu thresholding, instead of
+    marking the whole block (incl. its background whitespace) as text. Assumes
+    text pixels are the minority class within the crop -- a reasonable
+    assumption for a text paragraph/title block, less so for a solid list of
+    dense text lines with little whitespace, but still tighter than the full box.
+    Falls back to the full crop (no refinement) if the crop is degenerate.
+    """
+    if gray_crop.size == 0:
+        return gray_crop
+    _, otsu = cv2.threshold(gray_crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    fg_frac = float((otsu == 255).mean())
+    if fg_frac > 0.5:
+        otsu = 255 - otsu
+    return otsu
+
+
+def rasterize_mask_coarse_refined(image_rgb: Image.Image, polygons: Sequence[np.ndarray],
+                                   size_wh: Tuple[int, int]) -> np.ndarray:
+    """Like rasterize_mask, but for block/element-level boxes: within each box,
+    keep only the pixels that look like actual text strokes (via Otsu on that
+    crop) rather than flood-filling the entire block including its whitespace
+    and, for slide/document layouts, any non-text content that slipped past
+    category filtering.
+    """
+    w, h = size_wh
+    mask = np.zeros((h, w), dtype=np.uint8)
+    gray_full = cv2.cvtColor(np.array(image_rgb.convert("RGB")), cv2.COLOR_RGB2GRAY)
+    for p in polygons:
+        if p is None or len(p) < 3:
+            continue
+        x0, y0 = p.min(axis=0)
+        x1, y1 = p.max(axis=0)
+        x0i, y0i = max(0, int(np.floor(x0))), max(0, int(np.floor(y0)))
+        x1i, y1i = min(w, int(np.ceil(x1))), min(h, int(np.ceil(y1)))
+        if x1i <= x0i or y1i <= y0i:
+            continue
+        local_poly = (p - [x0i, y0i]).astype(np.int32).reshape(-1, 1, 2)
+        local_poly_mask = np.zeros((y1i - y0i, x1i - x0i), dtype=np.uint8)
+        cv2.fillPoly(local_poly_mask, [local_poly], 255)
+
+        gray_crop = gray_full[y0i:y1i, x0i:x1i]
+        refined = _refine_block_to_strokes(gray_crop)
+        combined = cv2.bitwise_and(local_poly_mask, refined)
+        mask[y0i:y1i, x0i:x1i] = np.maximum(mask[y0i:y1i, x0i:x1i], combined)
+    return mask
+
+
 def downscale_mask(mask: np.ndarray, scale: float = MASK_SCALE) -> np.ndarray:
     h, w = mask.shape[:2]
     nh, nw = max(1, round(h * scale)), max(1, round(w * scale))
@@ -57,8 +107,15 @@ def mask_contour_stats(mask: np.ndarray) -> Tuple[int, float]:
     return len(contours), area_frac
 
 
-def save_sample(out_dir: str, dataset_name: str, sample: Sample) -> dict:
-    """Resize image, rasterize+downscale mask, write both, return a meta.jsonl record."""
+def save_sample(out_dir: str, dataset_name: str, sample: Sample, refine_coarse: bool = True) -> dict:
+    """Resize image, rasterize+downscale mask, write both, return a meta.jsonl record.
+
+    If sample.coarse is True (block/element-level boxes, e.g. PubLayNet, SynSlides)
+    and refine_coarse is True (default), uses intensity-based refinement to shrink
+    each box down to its actual text strokes instead of flood-filling the whole
+    block. Pass refine_coarse=False to get the old flood-fill-the-whole-box
+    behavior back (e.g. for debugging/comparison).
+    """
     img_dir = os.path.join(out_dir, dataset_name, "images")
     mask_dir = os.path.join(out_dir, dataset_name, "masks")
     os.makedirs(img_dir, exist_ok=True)
@@ -69,7 +126,10 @@ def save_sample(out_dir: str, dataset_name: str, sample: Sample) -> dict:
     rw, rh = resized_img.size
 
     scaled_polys = [ (p * scale) for p in sample.polygons ]
-    full_res_mask = rasterize_mask(scaled_polys, (rw, rh))
+    if sample.coarse and refine_coarse:
+        full_res_mask = rasterize_mask_coarse_refined(resized_img, scaled_polys, (rw, rh))
+    else:
+        full_res_mask = rasterize_mask(scaled_polys, (rw, rh))
     small_mask = downscale_mask(full_res_mask, MASK_SCALE)
     mh, mw = small_mask.shape[:2]
 
@@ -93,6 +153,7 @@ def save_sample(out_dir: str, dataset_name: str, sample: Sample) -> dict:
         "num_polygons": len(sample.polygons),
         "text_area_frac": area_frac,
         "num_contours": num_contours,
+        "coarse_source": sample.coarse,
     }
 
 
