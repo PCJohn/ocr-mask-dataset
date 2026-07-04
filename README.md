@@ -9,19 +9,6 @@ Every dataset here downloads with **zero manual steps** — no login, no
 clicking "I agree," no Kaggle/RRC account. Run one script and you have raw
 data on disk.
 
-## License note
-
-All four datasets carry a license that **explicitly permits commercial use**
-(CC BY 4.0 or CDLA-Permissive-1.0). CC BY / CDLA-Permissive still require you
-to keep attribution/citation — that's a "don't strip the notice" obligation,
-not a blocker. I'm not a lawyer; re-verify before shipping a commercial
-product, licenses/hosting can change.
-
-Common research benchmarks (FUNSD, SROIE, IAM, ICDAR RRC challenge sets,
-IAM, GNHK, LectureVideoDB) are **excluded** — they're non-commercial/research
--only licensed and/or require a manual login, both of which are out of scope
-here.
-
 ## Dataset checklist
 
 | # | Dataset | Domain | Size | Annotation type | License | Download |
@@ -35,119 +22,12 @@ here.
 | 7 | [DocLayNet](https://github.com/DS4SD/DocLayNet) (via [pierreguillou/DocLayNet-base](https://huggingface.co/datasets/pierreguillou/DocLayNet-base) mirror) | real scanned/digital documents: financial reports, manuals, scientific articles, laws, patents, tenders | ~691 train images (small on purpose) | **line-level boxes** (`bboxes_line`) — a step up in granularity from PubLayNet/SynSlides | CDLA-Permissive-1.0 | HF `datasets`, auto, but uses a custom loading script (`trust_remote_code=True`) — **opt-in only**, unverified from this sandboxed environment |
 | 8 | [NVIDIA OCR-Synthetic-Multilingual-v1](https://huggingface.co/datasets/nvidia/OCR-Synthetic-Multilingual-v1) | **synthetic** rendered text — **Japanese, Korean, Russian, Chinese (Simplified + Traditional), English** | full dataset is 5.45TB across millions of samples/language, but we only pull one small shard per language (a few thousand samples each) via direct HF file downloads | genuine **word- and line-level quad polygons** (not block-level) | CC BY 4.0 | HF Hub direct file download (`hf_hub_download`), auto — **opt-in only** (synthetic, not real photos/scans, and you should pick which languages you actually want) |
 
-## Language coverage, updated
+## Language Coverage
 
-You also asked about Chinese/Japanese/Korean, European languages, Russian,
-Urdu, Farsi. Here's what actually panned out:
-
-- **Chinese, Japanese, Korean, Russian**: covered by **#8, NVIDIA
-  OCR-Synthetic-Multilingual-v1** — genuinely the best-fit find here, CC BY
-  4.0, real word/line-level quads (not block-level), auto-downloadable per
-  shard. The catch: it's **synthetic** (rendered text on backgrounds via a
-  SynthDoG-style pipeline), not real photographed/scanned content — treat it
-  as a complement to the real-world datasets above, not a substitute, the
-  same way SynSlides complements rather than replaces real lecture footage.
-- **European languages** (French, German, Spanish, Italian, etc.): no
-  dedicated dataset found that's commercially licensed, auto-downloadable,
-  and specifically targets these — they're likely present incidentally in
-  general-purpose datasets like PubLayNet/TextOCR (Latin-script Western
-  content sometimes appears) but not annotated *as* a specific European
-  language. Didn't find a gap-filler worth adding here.
-- **Urdu**: the closest options I found (Cursive-Text Urdu scene-text
-  dataset) are **CC BY-NC-ND** — non-commercial, excluded by this project's
-  rules. Nothing commercially-licensed and auto-downloadable turned up.
-- **Farsi/Persian**: similarly, what exists (IDPL-PFOD, PESTD) doesn't have
-  a clearly stated commercial-permitting license I could verify. Nothing
-  added.
-- **Arabic** (not on your list, but related script family): there IS a
-  genuinely good one — [Humans in the Loop's Arabic Documents OCR
-  dataset](https://humansintheloop.org/resources/datasets/arabic-documents-ocr-dataset/),
-  10K images, line-level boxes, **CC0 1.0** (public domain, the most
-  permissive license possible). It doesn't qualify for this repo's "fully
-  automatic, no login" bar as-is — it's distributed via Kaggle, which
-  requires a (free) Kaggle account/API key, same tier of friction as SROIE.
-  Worth doing manually if Arabic matters to you; not wired in here.
-
-### One I looked at and rejected: IndicDLP
-
-[IndicDLP](https://indicdlp.github.io/) would have been an excellent fit on
-paper — 119,806 manually-annotated document images across **11 Indic
-languages + English**, spanning 12 domains including forms, newspapers,
-notices, and textbooks (real overlap with your "scanned documents" and
-"forms" use cases, and multilingual to boot). It doesn't make the cut here
-because its HF mirrors (`IndicDLP/IndicDLP-dataset`, `ai4bharat/indicdlp`)
-are **gated** — "Log in or Sign Up to review the conditions and access this
-dataset content" — which fails the "fully automatic, no login" bar, and its
-license isn't stated plainly enough on the gated page for me to confirm
-commercial use is clearly permitted. Worth revisiting if the gating/license
-situation changes; not included for now.
-
-## Language coverage — none of these are multilingual except BSTD
-
-You asked specifically about multilingual/Indian-language coverage, so to be
-direct about what's actually in each dataset:
-
-| Dataset | Language(s) |
-|---|---|
-| CORD | Indonesian only |
-| NAF | English only |
-| PubLayNet | English only (PubMed Central scientific articles) |
-| TextOCR | Predominantly English/Latin scenes (sourced from OpenImages). Non-English/illegible words *are* still polygon-annotated for location, just transcribed as a placeholder `"."` instead of real text — so it's usable for pure text-*location* masks on non-English text, just don't expect transcription value from it. |
-| SynSlides | English only (LLM-generated) |
-| **BSTD** | **Real multilingual**: Assamese, Bengali, Gujarati, Hindi, Kannada, Malayalam, Marathi, Odia, Punjabi, Tamil, Telugu, English — this is the one dataset here actually built for Indian-language coverage. |
-
-If your product needs balanced multilingual/Indian-language representation,
-**BSTD is the one to prioritize** despite its size — everything else in this
-repo is effectively monolingual. I looked for smaller multilingual
-alternatives (MLT-19, IIIT-ILST, ICDAR RRC multilingual sets) and they're all
-research-license-only, which is why they're not here — see "Excluded" notes
-throughout. I also didn't find a small (<1GB) multilingual scene-text dataset
-that's both commercially licensed and auto-downloadable; BSTD's size is the
-tradeoff for actually having that coverage. `--limit` in `build_dataset.py`
-still lets you cap how much of it you process into the final unified dataset,
-even though the initial download itself is all-or-nothing.
-
-## About the podcast/video-lecture domain specifically
-
-I looked for a dataset that's simultaneously (a) real lecture/podcast/video
-footage, (b) commercially licensed, and (c) fully automatic to download, and
-didn't find one — see "what's not here" below. **SynSlides** (#5) is the
-closest automatic + commercial-clean alternative I could find: it's
-LLM-generated synthetic slide images with automated bounding-box annotations
-for slide elements (titles, body text, bullet lists, equations, tables).
-It's not real lecture footage — no talking-head frames, no camera artifacts,
-no projector glare/angle — but it covers the **slide-content half** of that
-domain (dense on-slide text, presentation-style layouts) with a clean MIT
-license and zero manual steps.
-
-⚠️ One honest caveat on SynSlides: I could not verify its exact bounding-box
-annotation schema from this environment (the HF dataset viewer didn't fully
-render the annotation column for me). `src/datasets/synslides.py` inspects
-the dataset's actual columns at load time and tries several likely field
-names; if none match, it fails loudly and tells you which columns *were*
-found so you can fix one line. **Run `python -m src.datasets.synslides
---check` first** before including it in a full build.
-
-## What's still not here, and why
-
-Real **podcast / video-lecture / university-lecture-recording** footage
-(actual video frames, not synthetic slides) remains out of scope:
-- Public "lecture video" OCR datasets that exist (e.g. LectureVideoDB) are
-  research-license-only or require an author request — excluded by this
-  repo's rules.
-- General video-text datasets are either research-only (ICDAR video text
-  challenges) or aren't slide/lecture-domain.
-
-For that remaining slice — actual camera/screen-capture footage, talking
-heads, projector artifacts — your best bet is still self-generating it:
-sample frames from lecture/podcast videos you have rights to (your own
-recordings, or CC-licensed content — check the specific license per source,
-a lot of OpenCourseWare-type material is CC BY-NC which wouldn't clear your
-commercial-use bar), then either hand-label a small set or bootstrap labels
-by running a detector (e.g. one trained on the datasets above) and
-spot-correcting. That's a good next script to add
-(`src/datasets/selfgen_video_frames.py`, not yet written) but it's
-fundamentally a data-collection task, not a "here's a URL" task.
+- Indonesian (CORD)
+- English (NAF, PubLayNet, TextOCR, SynSlides, DocLayNet, BSTD, NVIDIA multilingual)
+- Assamese, Bengali, Gujarati, Hindi, Kannada, Malayalam, Marathi, Odia, Punjabi, Tamil, Telugu (BSTD)
+- Japanese, Korean, Russian, Chinese (Simplified + Traditional) (NVIDIA multilingual)
 
 ## Unified output format
 
@@ -223,9 +103,6 @@ don't expect it to be instant.
 
 ## Mask granularity & known limitations
 
-You should know this going in, since it affects what your trained segmenter
-will learn:
-
 | Dataset | Granularity | Non-text categories excluded? |
 |---|---|---|
 | CORD | word-level | n/a — pure text dataset |
@@ -236,34 +113,6 @@ will learn:
 | SynSlides | **element-level, not line-level** | yes — filters annotation category *names* against an include/exclude keyword list (`src/datasets/synslides.py`), since this dataset's exact category schema wasn't independently verified from this environment |
 | DocLayNet | **line-level** (genuinely fine-grained, not a heuristic fix) | yes — excludes `Picture` always, excludes `Table` by default |
 | NVIDIA multilingual | **word/line-level quads** (genuinely fine-grained) | n/a — pure text dataset, but synthetic not real |
-
-Two distinct problems were found and fixed here:
-1. **A real bug**: both PubLayNet and SynSlides annotate *all* layout elements
-   (including images/figures/charts), and the original processors here
-   included every annotation regardless of category — so image/infographic
-   regions were being rasterized into the "text" mask. Both now filter by
-   category before building polygons.
-2. **A real limitation, mitigated but not eliminated**: PubLayNet and
-   SynSlides annotate whole text *blocks* (a full paragraph, a full title),
-   not individual lines — that's inherent to how those datasets were labeled,
-   not something a processing script can invent finer boxes for. To reduce
-   the effect, samples from these two datasets are marked `coarse=True`, and
-   `save_sample()` (see `src/common.py`) applies an **intensity-based
-   refinement**: within each coarse box, it keeps only the pixels that Otsu
-   thresholding identifies as actual text strokes, instead of flood-filling
-   the entire block including its background whitespace. This meaningfully
-   tightens the mask but is still a heuristic, not ground truth — expect it
-   to occasionally under- or over-segment on unusual backgrounds (e.g. a
-   title block with a colored banner behind it). Disable it with
-   `--no-refine-coarse-masks` if you want to compare against the old
-   flood-fill behavior or roll your own refinement.
-
-Every processed sample records whether it came from a coarse source
-(`coarse_source: true/false` in `meta.jsonl`), so you can filter, upweight,
-or exclude coarse-sourced samples per your training needs — e.g. if you care
-a lot about fine-grained masks, you could train primarily on
-CORD/NAF/TextOCR/BSTD and use PubLayNet/SynSlides only for scale/diversity,
-or exclude them from an eval set to keep your metrics honest.
 
 ## Notes on masks vs boxes
 
