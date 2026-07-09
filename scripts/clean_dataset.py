@@ -100,13 +100,20 @@ def _corruption_check(records, processed_dir, decisions, dry_run):
             decisions[rec["id"]] = reason
             n += 1
             if not dry_run:
-                for p in (img_path, mask_path):
+                for path in (img_path, mask_path):
                     try:
-                        os.remove(p)
-                    except OSError:
+                        os.remove(path)
+                    except FileNotFoundError:
                         pass
+                    except OSError as e:
+                        print(f"  Warning: could not delete {path}: {e}")
 
-    print(f"  {n} corrupt samples" + (" (dry-run)" if dry_run else " deleted"))
+    suffix = (
+        " (dry-run, files NOT deleted)"
+        if dry_run
+        else f" — image + mask files deleted from data/processed/"
+    )
+    print(f"  {n} corrupt samples{suffix}")
     return n
 
 
@@ -325,9 +332,13 @@ def main():
     for rec in records:
         decisions.setdefault(rec["id"], "ok")
 
-    # Pass 2: delete + report
+    # Pass 2: delete low-iou/error files and write report
+    # Note: corrupt files were already deleted during Pass 0.
+    # This pass handles low-iou and error verdicts only.
     counts: dict[str, int] = {}
     report_rows = []
+    n_deleted_files = 0
+
     for rec in records:
         v = decisions.get(rec["id"], "ok")
         bucket = (
@@ -341,14 +352,27 @@ def main():
         )
         counts[bucket] = counts.get(bucket, 0) + 1
         report_rows.append({"id": rec["id"], "dataset": rec["dataset"], "result": v})
-        if bucket in ("corrupt", "low-iou", "error") and not args.dry_run:
+
+        # Only delete here for non-corrupt verdicts (corrupt files deleted in Pass 0)
+        if bucket in ("low-iou", "error") and not args.dry_run:
             ds = rec["dataset"]
             base = os.path.join(args.processed, ds)
             for fld in ("image_path", "mask_path"):
+                fpath = os.path.join(base, rec[fld])
                 try:
-                    os.remove(os.path.join(base, rec[fld]))
-                except OSError:
-                    pass
+                    os.remove(fpath)
+                    n_deleted_files += 1
+                except FileNotFoundError:
+                    pass  # already gone (shouldn't happen for low-iou, but be safe)
+                except OSError as e:
+                    print(f"  Warning: could not delete {fpath}: {e}")
+
+    if not args.dry_run:
+        print(
+            f"\nDeleted {n_deleted_files} files from data/processed/ "
+            f"(images + masks for low-iou and error samples)."
+        )
+        print("Raw source data in data/raw/ is untouched.")
 
     if not args.dry_run:
         dsets = args.datasets or list({r["dataset"] for r in records})

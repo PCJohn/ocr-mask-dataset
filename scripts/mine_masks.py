@@ -57,7 +57,7 @@ from src.common import (
     downscale_mask,
     mask_contour_stats,
 )
-from scripts.ocr_backend import get_reader, boxes_from_image, polys_to_mask
+from scripts.ocr_backend import get_reader, _detect_raw, polys_to_mask, _resize_for_ocr
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -154,13 +154,7 @@ def _random_arxiv_queries():
 
 
 def source_arxiv(
-    n: int,
-    reader,
-    backend: str,
-    min_conf: float,
-    out_dir: Path,
-    meta_rows: list,
-    dry_run: bool,
+    n: int, reader, text_threshold: float, out_dir: Path, meta_rows: list, dry_run: bool
 ):
     import arxiv, pypdfium2
 
@@ -199,7 +193,9 @@ def source_arxiv(
                 # render at 150 DPI equivalent (scale=2.0 gives ~144 DPI from 72 DPI base)
                 bitmap = page.render(scale=2.0)
                 pil_img = bitmap.to_pil().convert("RGB")
-                ocr_polys = boxes_from_image(reader, pil_img, backend, min_conf)
+                arr, scale = _resize_for_ocr(pil_img)
+                ocr_polys, _ = _detect_raw(arr, scale, reader, text_threshold, 0.4, 0.4)
+                del arr
                 sample_id = f"arxiv_{paper.entry_id.split('/')[-1]}_p{page_idx}"
                 _save(
                     pil_img,
@@ -242,8 +238,7 @@ def _random_wiki_titles(lang: str = "en", n: int = 50):
 def source_wikipedia(
     n: int,
     reader,
-    backend: str,
-    min_conf: float,
+    text_threshold: float,
     out_dir: Path,
     meta_rows: list,
     dry_run: bool,
@@ -285,7 +280,11 @@ def source_wikipedia(
 
                     img_bytes = page.screenshot(type="png")
                     pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                    ocr_polys = boxes_from_image(reader, pil_img, backend, min_conf)
+                    arr, scale = _resize_for_ocr(pil_img)
+                    ocr_polys, _ = _detect_raw(
+                        arr, scale, reader, text_threshold, 0.4, 0.4
+                    )
+                    del arr
                     safe_title = "".join(
                         c if c.isalnum() or c in "-_" else "_" for c in title
                     )[:40]
@@ -313,8 +312,7 @@ def source_wikipedia(
 def source_youtube(
     n: int,
     reader,
-    backend: str,
-    min_conf: float,
+    text_threshold: float,
     out_dir: Path,
     meta_rows: list,
     dry_run: bool,
@@ -410,9 +408,11 @@ def source_youtube(
                             if yielded >= n:
                                 break
                             pil_img = Image.open(f).convert("RGB")
-                            ocr_polys = boxes_from_image(
-                                reader, pil_img, backend, min_conf
+                            arr, scale = _resize_for_ocr(pil_img)
+                            ocr_polys, _ = _detect_raw(
+                                arr, scale, reader, text_threshold, 0.4, 0.4
                             )
+                            del arr
                             sample_id = f"yt_{vid_id}_{i:04d}"
                             _save(
                                 pil_img,
@@ -436,13 +436,7 @@ def source_youtube(
 
 
 def source_pubmed(
-    n: int,
-    reader,
-    backend: str,
-    min_conf: float,
-    out_dir: Path,
-    meta_rows: list,
-    dry_run: bool,
+    n: int, reader, text_threshold: float, out_dir: Path, meta_rows: list, dry_run: bool
 ):
     """Open-access PDFs from PubMed Central (OA subset, no login)."""
     import pypdfium2
@@ -508,7 +502,9 @@ def source_pubmed(
                     break
                 bitmap = doc[pg].render(scale=2.0)
                 pil_img = bitmap.to_pil().convert("RGB")
-                ocr_polys = boxes_from_image(reader, pil_img, backend, min_conf)
+                arr, scale = _resize_for_ocr(pil_img)
+                ocr_polys, _ = _detect_raw(arr, scale, reader, text_threshold, 0.4, 0.4)
+                del arr
                 _save(
                     pil_img,
                     ocr_polys,
@@ -530,13 +526,7 @@ def source_pubmed(
 
 
 def source_gutenberg(
-    n: int,
-    reader,
-    backend: str,
-    min_conf: float,
-    out_dir: Path,
-    meta_rows: list,
-    dry_run: bool,
+    n: int, reader, text_threshold: float, out_dir: Path, meta_rows: list, dry_run: bool
 ):
     """Render random pages of Project Gutenberg books as images."""
     import textwrap
@@ -580,7 +570,9 @@ def source_gutenberg(
                 pil_img = _render_text_page(chunk.strip(), width=900, height=1200)
                 if pil_img is None:
                     continue
-                ocr_polys = boxes_from_image(reader, pil_img, backend, min_conf)
+                arr, scale = _resize_for_ocr(pil_img)
+                ocr_polys, _ = _detect_raw(arr, scale, reader, text_threshold, 0.4, 0.4)
+                del arr
                 book_id = str(book.get("id", ""))
                 _save(
                     pil_img,
@@ -653,13 +645,7 @@ def _try_system_fonts() -> list[str]:
 
 
 def source_synthetic(
-    n: int,
-    reader,
-    backend: str,
-    min_conf: float,
-    out_dir: Path,
-    meta_rows: list,
-    dry_run: bool,
+    n: int, reader, text_threshold: float, out_dir: Path, meta_rows: list, dry_run: bool
 ):
     """Generate synthetic text images with varied fonts, sizes, and layouts."""
     try:
@@ -722,7 +708,9 @@ def source_synthetic(
             )
             if pil_img is None:
                 continue
-            ocr_polys = boxes_from_image(reader, pil_img, backend, min_conf)
+            arr, scale = _resize_for_ocr(pil_img)
+            ocr_polys, _ = _detect_raw(arr, scale, reader, text_threshold, 0.4, 0.4)
+            del arr
             _save(
                 pil_img,
                 ocr_polys,
@@ -742,13 +730,7 @@ def source_synthetic(
 
 
 def source_openalex(
-    n: int,
-    reader,
-    backend: str,
-    min_conf: float,
-    out_dir: Path,
-    meta_rows: list,
-    dry_run: bool,
+    n: int, reader, text_threshold: float, out_dir: Path, meta_rows: list, dry_run: bool
 ):
     """Open-access PDFs from OpenAlex (no API key needed for basic use).
     Great diversity: STEM, humanities, social sciences, multilingual."""
@@ -805,7 +787,11 @@ def source_openalex(
                             break
                         bitmap = doc[pg].render(scale=2.0)
                         pil_img = bitmap.to_pil().convert("RGB")
-                        ocr_polys = boxes_from_image(reader, pil_img, backend, min_conf)
+                        arr, scale = _resize_for_ocr(pil_img)
+                        ocr_polys, _ = _detect_raw(
+                            arr, scale, reader, text_threshold, 0.4, 0.4
+                        )
+                        del arr
                         _save(
                             pil_img,
                             ocr_polys,
@@ -857,7 +843,7 @@ def main():
         default="data/processed",
         help="output root (default: data/processed)",
     )
-    ap.add_argument("--backend", default="easyocr", choices=["easyocr", "paddleocr"])
+    # backend is now always easyocr detector-only (see ocr_backend.py)
     ap.add_argument("--gpu", action="store_true")
     ap.add_argument("--min-conf", type=float, default=0.3)
     ap.add_argument(
@@ -886,26 +872,19 @@ def main():
     sources = ALL_SOURCES if "all" in args.sources else args.sources
     out_dir = Path(args.out_dir)
 
-    print(f"Initialising OCR backend ({args.backend}, gpu={args.gpu})...")
-    reader = get_reader(backend=args.backend, gpu=args.gpu)
+    print(f"Initialising CRAFT detector (detector-only, gpu={args.gpu})...")
+    reader = get_reader(gpu=args.gpu)
 
     meta_rows: list = []
 
     dispatch = {
         "arxiv": lambda: source_arxiv(
-            args.n,
-            reader,
-            args.backend,
-            args.min_conf,
-            out_dir,
-            meta_rows,
-            args.dry_run,
+            args.n, reader, args.text_threshold, out_dir, meta_rows, args.dry_run
         ),
         "wikipedia": lambda: source_wikipedia(
             args.n,
             reader,
-            args.backend,
-            args.min_conf,
+            args.text_threshold,
             out_dir,
             meta_rows,
             args.dry_run,
@@ -914,48 +893,23 @@ def main():
         "youtube": lambda: source_youtube(
             args.n,
             reader,
-            args.backend,
-            args.min_conf,
+            args.text_threshold,
             out_dir,
             meta_rows,
             args.dry_run,
             youtube_urls=args.youtube_urls,
         ),
         "synthetic": lambda: source_synthetic(
-            args.n,
-            reader,
-            args.backend,
-            args.min_conf,
-            out_dir,
-            meta_rows,
-            args.dry_run,
+            args.n, reader, args.text_threshold, out_dir, meta_rows, args.dry_run
         ),
         "pubmed": lambda: source_pubmed(
-            args.n,
-            reader,
-            args.backend,
-            args.min_conf,
-            out_dir,
-            meta_rows,
-            args.dry_run,
+            args.n, reader, args.text_threshold, out_dir, meta_rows, args.dry_run
         ),
         "gutenberg": lambda: source_gutenberg(
-            args.n,
-            reader,
-            args.backend,
-            args.min_conf,
-            out_dir,
-            meta_rows,
-            args.dry_run,
+            args.n, reader, args.text_threshold, out_dir, meta_rows, args.dry_run
         ),
         "openalex": lambda: source_openalex(
-            args.n,
-            reader,
-            args.backend,
-            args.min_conf,
-            out_dir,
-            meta_rows,
-            args.dry_run,
+            args.n, reader, args.text_threshold, out_dir, meta_rows, args.dry_run
         ),
     }
 
