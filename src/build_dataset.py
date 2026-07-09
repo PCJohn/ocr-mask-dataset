@@ -3,8 +3,8 @@ images+masks format, then compute per-dataset and combined statistics.
 
 Usage:
     python -m src.build_dataset --datasets cord naf publaynet textocr synslides
-    python -m src.build_dataset --datasets cord naf publaynet textocr synslides --limit 200   # quick smoke test
-    python -m src.build_dataset --datasets cord naf publaynet textocr synslides --limit 200 --shuffle
+    python -m src.build_dataset --datasets cord naf publaynet textocr synslides --limit 200
+    python -m src.build_dataset --datasets cord naf publaynet textocr synslides --limit 200 --no-shuffle
 """
 
 import argparse
@@ -19,6 +19,20 @@ from src.common import save_sample, write_jsonl, read_jsonl
 from src.stats import compute_stats, render_markdown
 
 REGISTRY = {}
+
+# Datasets that are already on disk after download -- can be shuffled cheaply
+# by collecting all samples first, then shuffling, then slicing.
+# Streamed datasets (publaynet) can't do this -- they use a shuffle buffer instead.
+LOCAL_DATASETS = {
+    "cord",
+    "naf",
+    "textocr",
+    "synslides",
+    "bstd",
+    "doclaynet",
+    "nvidia_multilingual",
+}
+SHUFFLE_BUFFER = 2000  # samples buffered before random draw for streamed datasets
 
 
 def _lazy_registry():
@@ -50,41 +64,55 @@ def process_dataset(
     name: str,
     out_dir: str,
     limit: int = None,
-    shuffle: bool = False,
+    shuffle: bool = True,
     seed: int = 42,
     refine_coarse: bool = True,
 ) -> str:
     mod = _lazy_registry()[name]
     records = []
+    rng = random.Random(seed)
 
-    if limit and shuffle:
-        # Reservoir sampling (Algorithm R): one pass over the full stream, uniform
-        # random sample of `limit` items without needing to know the stream length
-        # up front. Note this still walks the *entire* underlying dataset once --
-        # for a fully-local/already-downloaded dataset that's cheap, but for a
-        # streamed one (e.g. publaynet) it means pulling the whole remote stream
-        # over the network just to end up keeping `limit` of them. Fine for
-        # smaller datasets, worth knowing about for the big streamed ones.
-        rng = random.Random(seed)
-        reservoir = []
-        for i, sample in enumerate(
-            tqdm(mod.iter_samples(), desc=f"processing {name} (reservoir sampling)")
-        ):
-            if i < limit:
-                reservoir.append(sample)
-            else:
-                j = rng.randint(0, i)
-                if j < limit:
-                    reservoir[j] = sample
-        samples = reservoir
-    else:
-        samples = []
-        for sample in tqdm(mod.iter_samples(), desc=f"processing {name}"):
-            samples.append(sample)
-            if limit and len(samples) >= limit:
+    if name in LOCAL_DATASETS:
+        # Local datasets: collect everything (or up to a generous cap to avoid
+        # OOM on huge datasets like textocr), shuffle, then slice to limit.
+        # Cap collection at max(limit*10, 5000) so we sample from a good spread
+        # without loading all 28k TextOCR images into memory.
+        collect_cap = max(limit * 10, 5000) if limit else None
+        all_samples = []
+        for sample in tqdm(mod.iter_samples(), desc=f"collecting {name}"):
+            all_samples.append(sample)
+            if collect_cap and len(all_samples) >= collect_cap:
                 break
+        if shuffle:
+            rng.shuffle(all_samples)
+        samples = all_samples[:limit] if limit else all_samples
+    else:
+        # Streamed datasets (publaynet): use a shuffle buffer -- fill a buffer,
+        # draw randomly from it, refill. Avoids streaming the whole dataset.
+        if shuffle and limit:
+            buf = []
+            samples = []
+            for sample in tqdm(
+                mod.iter_samples(), desc=f"processing {name} (buffered shuffle)"
+            ):
+                buf.append(sample)
+                if len(buf) >= SHUFFLE_BUFFER:
+                    idx = rng.randrange(len(buf))
+                    samples.append(buf.pop(idx))
+                    if len(samples) >= limit:
+                        break
+            # drain remainder if we still need more
+            if len(samples) < (limit or 0) and buf:
+                rng.shuffle(buf)
+                samples.extend(buf[: limit - len(samples)])
+        else:
+            samples = []
+            for sample in tqdm(mod.iter_samples(), desc=f"processing {name}"):
+                samples.append(sample)
+                if limit and len(samples) >= limit:
+                    break
 
-    for sample in samples:
+    for sample in tqdm(samples, desc=f"saving {name}", leave=False):
         try:
             rec = save_sample(out_dir, name, sample, refine_coarse=refine_coarse)
             records.append(rec)
@@ -120,19 +148,15 @@ def main():
     )
     p.add_argument("--out_dir", default="data/processed")
     p.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="cap number of samples per dataset (useful for a quick smoke test)",
+        "--limit", type=int, default=None, help="cap number of samples per dataset"
     )
     p.add_argument(
-        "--shuffle",
+        "--no-shuffle",
         action="store_true",
-        help="randomly sample `--limit` items instead of taking the first N in dataset order "
-        "(via reservoir sampling -- one full pass over each dataset, cheap for local data, "
-        "slower for streamed ones like publaynet since it still reads the whole remote stream)",
+        help="take the first --limit samples in dataset order instead of shuffling "
+        "(default is to shuffle when --limit is set)",
     )
-    p.add_argument("--seed", type=int, default=42, help="random seed for --shuffle")
+    p.add_argument("--seed", type=int, default=42, help="random seed for shuffle")
     p.add_argument(
         "--no-refine-coarse-masks",
         action="store_true",
@@ -150,7 +174,7 @@ def main():
             name,
             args.out_dir,
             limit=args.limit,
-            shuffle=args.shuffle,
+            shuffle=not args.no_shuffle,
             seed=args.seed,
             refine_coarse=not args.no_refine_coarse_masks,
         )
