@@ -72,7 +72,8 @@ def iter_samples(raw_dir: str = RAW_DIR):
             coords = poly_entry.get("coordinates")
             if coords and len(coords) >= 3:
                 polys.append(np.array(coords, dtype=np.float32))
-        img = Image.open(img_path)
+        with Image.open(img_path) as im:
+            img = im.convert("RGB")
         yield Sample(sample_id=key, image=img, polygons=polys)
 
 

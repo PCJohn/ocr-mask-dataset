@@ -130,7 +130,8 @@ def iter_samples(raw_dir: str = RAW_DIR):
                 if bbox and len(bbox) == 4:
                     x, y, w, h = bbox
                     polys.append(box_to_polygon(x, y, x + w, y + h))
-            img = Image.open(path)
+            with Image.open(path) as im:
+                img = im.convert("RGB")
             # SynSlides boxes are whole element blocks (a title block, a body-text
             # block), not per-line -- mark coarse so save_sample refines them down
             # to actual text strokes instead of flood-filling the whole block.

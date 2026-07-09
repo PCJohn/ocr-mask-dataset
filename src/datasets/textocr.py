@@ -89,7 +89,8 @@ def _iter_split(raw_dir: str, split: str, json_name: str):
             if pts and len(pts) >= 6:
                 polys.append(np.array(pts, dtype=np.float32).reshape(-1, 2))
 
-        img = Image.open(img_path)
+        with Image.open(img_path) as im:
+            img = im.convert("RGB")
         yield Sample(sample_id=f"{split}_{img_id}", image=img, polygons=polys)
 
 

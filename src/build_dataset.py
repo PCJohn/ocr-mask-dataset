@@ -6,6 +6,7 @@ Usage:
     python -m src.build_dataset --datasets cord naf publaynet textocr synslides --limit 200   # quick smoke test
     python -m src.build_dataset --datasets cord naf publaynet textocr synslides --limit 200 --shuffle
 """
+
 import argparse
 import json
 import os
@@ -23,7 +24,17 @@ REGISTRY = {}
 def _lazy_registry():
     if REGISTRY:
         return REGISTRY
-    from src.datasets import cord, naf, publaynet, textocr, synslides, bstd, doclaynet, nvidia_multilingual
+    from src.datasets import (
+        cord,
+        naf,
+        publaynet,
+        textocr,
+        synslides,
+        bstd,
+        doclaynet,
+        nvidia_multilingual,
+    )
+
     REGISTRY["cord"] = cord
     REGISTRY["naf"] = naf
     REGISTRY["publaynet"] = publaynet
@@ -35,8 +46,14 @@ def _lazy_registry():
     return REGISTRY
 
 
-def process_dataset(name: str, out_dir: str, limit: int = None, shuffle: bool = False, seed: int = 42,
-                     refine_coarse: bool = True) -> str:
+def process_dataset(
+    name: str,
+    out_dir: str,
+    limit: int = None,
+    shuffle: bool = False,
+    seed: int = 42,
+    refine_coarse: bool = True,
+) -> str:
     mod = _lazy_registry()[name]
     records = []
 
@@ -50,7 +67,9 @@ def process_dataset(name: str, out_dir: str, limit: int = None, shuffle: bool = 
         # smaller datasets, worth knowing about for the big streamed ones.
         rng = random.Random(seed)
         reservoir = []
-        for i, sample in enumerate(tqdm(mod.iter_samples(), desc=f"processing {name} (reservoir sampling)")):
+        for i, sample in enumerate(
+            tqdm(mod.iter_samples(), desc=f"processing {name} (reservoir sampling)")
+        ):
             if i < limit:
                 reservoir.append(sample)
             else:
@@ -81,32 +100,60 @@ def process_dataset(name: str, out_dir: str, limit: int = None, shuffle: bool = 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--datasets", nargs="+", default=["cord", "naf", "publaynet", "textocr", "synslides"],
-                    choices=["cord", "naf", "publaynet", "textocr", "synslides", "bstd", "doclaynet",
-                             "nvidia_multilingual"],
-                    help="bstd (~17GB), doclaynet (custom loading script, unverified), and "
-                         "nvidia_multilingual (synthetic, not real photos/scans) aren't in the default "
-                         "set -- opt in explicitly")
+    p.add_argument(
+        "--datasets",
+        nargs="+",
+        default=["cord", "naf", "publaynet", "textocr", "synslides"],
+        choices=[
+            "cord",
+            "naf",
+            "publaynet",
+            "textocr",
+            "synslides",
+            "bstd",
+            "doclaynet",
+            "nvidia_multilingual",
+        ],
+        help="bstd (~17GB), doclaynet (custom loading script, unverified), and "
+        "nvidia_multilingual (synthetic, not real photos/scans) aren't in the default "
+        "set -- opt in explicitly",
+    )
     p.add_argument("--out_dir", default="data/processed")
-    p.add_argument("--limit", type=int, default=None,
-                    help="cap number of samples per dataset (useful for a quick smoke test)")
-    p.add_argument("--shuffle", action="store_true",
-                    help="randomly sample `--limit` items instead of taking the first N in dataset order "
-                         "(via reservoir sampling -- one full pass over each dataset, cheap for local data, "
-                         "slower for streamed ones like publaynet since it still reads the whole remote stream)")
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="cap number of samples per dataset (useful for a quick smoke test)",
+    )
+    p.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="randomly sample `--limit` items instead of taking the first N in dataset order "
+        "(via reservoir sampling -- one full pass over each dataset, cheap for local data, "
+        "slower for streamed ones like publaynet since it still reads the whole remote stream)",
+    )
     p.add_argument("--seed", type=int, default=42, help="random seed for --shuffle")
-    p.add_argument("--no-refine-coarse-masks", action="store_true",
-                    help="disable intensity-based stroke refinement for block-level datasets "
-                         "(publaynet, synslides) -- without it, their masks flood-fill the whole "
-                         "text block/element box instead of just the text strokes inside it")
+    p.add_argument(
+        "--no-refine-coarse-masks",
+        action="store_true",
+        help="disable intensity-based stroke refinement for block-level datasets "
+        "(publaynet, synslides) -- without it, their masks flood-fill the whole "
+        "text block/element box instead of just the text strokes inside it",
+    )
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
 
     per_dataset_records = {}
     for name in args.datasets:
-        meta_path = process_dataset(name, args.out_dir, limit=args.limit, shuffle=args.shuffle, seed=args.seed,
-                                     refine_coarse=not args.no_refine_coarse_masks)
+        meta_path = process_dataset(
+            name,
+            args.out_dir,
+            limit=args.limit,
+            shuffle=args.shuffle,
+            seed=args.seed,
+            refine_coarse=not args.no_refine_coarse_masks,
+        )
         per_dataset_records[name] = read_jsonl(meta_path)
 
     # combined manifest
@@ -117,7 +164,9 @@ def main():
     stats_dir = os.path.join(args.out_dir, "stats")
     os.makedirs(stats_dir, exist_ok=True)
 
-    per_dataset_stats = {name: compute_stats(recs) for name, recs in per_dataset_records.items()}
+    per_dataset_stats = {
+        name: compute_stats(recs) for name, recs in per_dataset_records.items()
+    }
     combined_stats = compute_stats(all_records)
 
     with open(os.path.join(stats_dir, "per_dataset_stats.json"), "w") as f:
@@ -131,7 +180,9 @@ def main():
     with open(os.path.join(stats_dir, "stats_report.md"), "w") as f:
         f.write(report)
 
-    print(f"\nDone. {len(all_records)} total images across {len(args.datasets)} dataset(s).")
+    print(
+        f"\nDone. {len(all_records)} total images across {len(args.datasets)} dataset(s)."
+    )
     print(f"Manifest: {os.path.join(args.out_dir, 'manifest.jsonl')}")
     print(f"Stats report: {os.path.join(stats_dir, 'stats_report.md')}")
 
