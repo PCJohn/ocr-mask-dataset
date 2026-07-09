@@ -51,6 +51,9 @@ INCLUDE_KEYWORDS = (
     "header",
     "heading",
     "paragraph",
+    "enumeration",
+    "url",
+    "code",
 )
 EXCLUDE_KEYWORDS = (
     "image",
@@ -63,11 +66,18 @@ EXCLUDE_KEYWORDS = (
     "icon",
     "diagram",
     "picture",
+    "natural_image",
+    "slideNr",
+    "slide_nr",
+    "page_number",
 )
 
 
 def _is_text_category(name: str) -> bool:
     name = (name or "").lower()
+    # Captions are always text regardless of what they caption
+    if "caption" in name:
+        return True
     if any(k in name for k in EXCLUDE_KEYWORDS):
         return False
     return any(k in name for k in INCLUDE_KEYWORDS)

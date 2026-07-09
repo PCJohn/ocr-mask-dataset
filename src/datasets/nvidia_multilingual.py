@@ -86,8 +86,19 @@ def iter_samples(
                 n = min(n, limit_per_shard)
             for i in range(n):
                 img_bytes = f["images"][i]
-                img = Image.open(io.BytesIO(img_bytes.tobytes())).convert("RGB")
-                ann = json.loads(f["annotations"][i])
+                img = Image.open(
+                    io.BytesIO(
+                        img_bytes
+                        if isinstance(img_bytes, (bytes, bytearray))
+                        else img_bytes.tobytes()
+                    )
+                ).convert("RGB")
+                ann_raw = f["annotations"][i]
+                ann = json.loads(
+                    ann_raw
+                    if isinstance(ann_raw, (bytes, bytearray))
+                    else bytes(ann_raw)
+                )
                 polys = []
                 # word-level quads are the finest granularity available; use those directly
                 for w in ann.get("word_bboxes", []):
@@ -125,7 +136,12 @@ def _debug(
             for i in range(min(n_samples, n)):
                 ann_raw = f["annotations"][i]
                 try:
-                    ann = json.loads(ann_raw.tobytes())
+                    ann_bytes = (
+                        ann_raw
+                        if isinstance(ann_raw, (bytes, bytearray))
+                        else bytes(ann_raw)
+                    )
+                    ann = json.loads(ann_bytes)
                 except Exception as e:
                     print(f"    sample {i}: annotation parse error: {e}")
                     continue

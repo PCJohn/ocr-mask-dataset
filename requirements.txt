@@ -7,3 +7,10 @@ datasets>=2.14.0
 huggingface_hub
 gdown
 h5py
+easyocr
+arxiv
+pypdfium2
+wikipedia-api
+playwright
+yt-dlp
+faker

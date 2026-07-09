@@ -119,7 +119,7 @@ def _debug(raw_dir=RAW_DIR, n_samples: int = 3):
             a0 = ann_vals[0]
             print(f"    ann[0] keys: {list(a0.keys())}")
             coords = a0.get("coordinates")
-            lang = a0.get("language", a0.get("lang", "MISSING"))
+            lang = a0.get("script_language", a0.get("language", "MISSING"))
             print(
                 f"    coordinates type={type(coords).__name__}  len={len(coords) if coords else 0}  first_point={coords[0] if coords else 'MISSING'}"
             )

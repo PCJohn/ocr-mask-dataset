@@ -1,5 +1,4 @@
 """Shared helpers: polygon rasterization, resizing, stat aggregation, I/O."""
-
 import io
 import json
 import os
@@ -10,8 +9,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
-MAX_IMAGE_SIDE = 1024  # cap resized image longest side to this many px
-MASK_SCALE = 0.5  # masks stored at this fraction of the resized image size
+MAX_IMAGE_SIDE = 2048      # cap resized image longest side to this many px
+MASK_SCALE = 0.5           # masks stored at this fraction of the resized image size
 JPEG_QUALITY = 90
 
 # BSTD and other archival datasets have legitimately large images (>89MP).
@@ -30,7 +29,6 @@ class Sample:
         file-backed datasets (NAF, TextOCR, BSTD) so that the shuffle buffer
         never holds full uncompressed bitmaps in RAM.
     """
-
     sample_id: str
     image: Optional[Image.Image]
     polygons: List[np.ndarray] = field(default_factory=list)
@@ -42,34 +40,22 @@ class Sample:
             return self.image
         if self.image_loader is not None:
             return self.image_loader()
-        raise ValueError(
-            f"Sample {self.sample_id} has neither image nor image_loader set"
-        )
+        raise ValueError(f"Sample {self.sample_id} has neither image nor image_loader set")
 
 
-def resize_keep_aspect(
-    img: Image.Image, max_side: int = MAX_IMAGE_SIDE
-) -> Tuple[Image.Image, float]:
+def resize_keep_aspect(img: Image.Image, max_side: int = MAX_IMAGE_SIDE) -> Tuple[Image.Image, float]:
     w, h = img.size
     scale = min(1.0, max_side / max(w, h))
     if scale < 1.0:
-        img = img.resize(
-            (max(1, round(w * scale)), max(1, round(h * scale))), Image.BILINEAR
-        )
+        img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.BILINEAR)
     return img, scale
 
 
-def rasterize_mask(
-    polygons: Sequence[np.ndarray], size_wh: Tuple[int, int]
-) -> np.ndarray:
+def rasterize_mask(polygons: Sequence[np.ndarray], size_wh: Tuple[int, int]) -> np.ndarray:
     """polygons: list of (N,2) arrays in pixel coords matching size_wh=(W,H). Returns uint8 0/255 mask."""
     w, h = size_wh
     mask = np.zeros((h, w), dtype=np.uint8)
-    polys = [
-        p.astype(np.int32).reshape(-1, 1, 2)
-        for p in polygons
-        if p is not None and len(p) >= 3
-    ]
+    polys = [p.astype(np.int32).reshape(-1, 1, 2) for p in polygons if p is not None and len(p) >= 3]
     # boxes given as 2 points (x0,y0,x1,y1) rectangles are expanded by caller before this
     if polys:
         cv2.fillPoly(mask, polys, 255)
@@ -94,9 +80,8 @@ def _refine_block_to_strokes(gray_crop: np.ndarray) -> np.ndarray:
     return otsu
 
 
-def rasterize_mask_coarse_refined(
-    image_rgb: Image.Image, polygons: Sequence[np.ndarray], size_wh: Tuple[int, int]
-) -> np.ndarray:
+def rasterize_mask_coarse_refined(image_rgb: Image.Image, polygons: Sequence[np.ndarray],
+                                   size_wh: Tuple[int, int]) -> np.ndarray:
     """Like rasterize_mask, but for block/element-level boxes: within each box,
     keep only the pixels that look like actual text strokes (via Otsu on that
     crop) rather than flood-filling the entire block including its whitespace
@@ -143,9 +128,7 @@ def mask_contour_stats(mask: np.ndarray) -> Tuple[int, float]:
     return len(contours), area_frac
 
 
-def save_sample(
-    out_dir: str, dataset_name: str, sample: Sample, refine_coarse: bool = True
-) -> dict:
+def save_sample(out_dir: str, dataset_name: str, sample: Sample, refine_coarse: bool = True) -> dict:
     """Resize image, rasterize+downscale mask, write both, return a meta.jsonl record.
 
     If sample.coarse is True (block/element-level boxes, e.g. PubLayNet, SynSlides)
@@ -164,26 +147,20 @@ def save_sample(
     resized_img, scale = resize_keep_aspect(img)
     rw, rh = resized_img.size
 
-    scaled_polys = [(p * scale) for p in sample.polygons]
+    scaled_polys = [ (p * scale) for p in sample.polygons ]
     if sample.coarse and refine_coarse:
-        full_res_mask = rasterize_mask_coarse_refined(
-            resized_img, scaled_polys, (rw, rh)
-        )
+        full_res_mask = rasterize_mask_coarse_refined(resized_img, scaled_polys, (rw, rh))
     else:
         full_res_mask = rasterize_mask(scaled_polys, (rw, rh))
     small_mask = downscale_mask(full_res_mask, MASK_SCALE)
     mh, mw = small_mask.shape[:2]
 
-    num_contours, area_frac = mask_contour_stats(
-        full_res_mask
-    )  # measured at full res for accuracy
+    num_contours, area_frac = mask_contour_stats(full_res_mask)  # measured at full res for accuracy
 
     img_path = os.path.join("images", f"{sample.sample_id}.jpg")
     mask_path = os.path.join("masks", f"{sample.sample_id}.png")
 
-    resized_img.convert("RGB").save(
-        os.path.join(out_dir, dataset_name, img_path), quality=JPEG_QUALITY
-    )
+    resized_img.convert("RGB").save(os.path.join(out_dir, dataset_name, img_path), quality=JPEG_QUALITY)
     Image.fromarray(small_mask).save(os.path.join(out_dir, dataset_name, mask_path))
 
     return {
@@ -191,12 +168,9 @@ def save_sample(
         "dataset": dataset_name,
         "image_path": img_path,
         "mask_path": mask_path,
-        "orig_width": orig_w,
-        "orig_height": orig_h,
-        "resized_width": rw,
-        "resized_height": rh,
-        "mask_width": mw,
-        "mask_height": mh,
+        "orig_width": orig_w, "orig_height": orig_h,
+        "resized_width": rw, "resized_height": rh,
+        "mask_width": mw, "mask_height": mh,
         "mask_scale": MASK_SCALE,
         "num_polygons": len(sample.polygons),
         "text_area_frac": area_frac,
