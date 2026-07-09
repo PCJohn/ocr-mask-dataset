@@ -1,32 +1,17 @@
 """scripts/clean_dataset.py
-Bulk-clean the processed dataset by comparing each stored mask against
-what an off-the-shelf OCR detector (EasyOCR by default) finds in the same
-image.  Samples are deleted when the two masks disagree badly.
+Bulk-clean the processed dataset using EasyOCR's CRAFT text detector
+(detector-only mode — no recogniser, no per-script model groups, works
+for all languages with a single reader).
 
-MEMORY STRATEGY:
-  - EasyOCR readers are loaded ONE SCRIPT-GROUP AT A TIME and explicitly
-    deleted + GPU cache flushed between groups, so peak RAM/VRAM is one
-    reader's worth, not all 8 simultaneously.
-  - Each PIL image is explicitly closed after processing.
-  - Results from pass 1 (decision per sample) are stored as a lightweight
-    list of strings; deletion and manifest rewriting happen in pass 2.
-  - A checkpoint file is written after each script group so a crash mid-run
-    can be resumed with --resume.
-
-Decision metric:
-  ocr_frac  = fraction of image pixels EasyOCR marks as text
-  mask_frac = fraction stored mask marks as text
-  delta     = ocr_frac - mask_frac
-
-A sample is flagged MISS  if delta >  --max-miss-delta   (mask missed real text)
-A sample is flagged EXTRA if delta <  --max-extra-delta  (mask has far more text than OCR)
-A sample that any group flags MISS or EXTRA is deleted.
+IoU(stored_mask, detector_mask) < --min-iou → sample deleted.
+One threshold, one reader, one pass.
 
 Usage:
     python -m scripts.clean_dataset --dry-run
     python -m scripts.clean_dataset --gpu
+    python -m scripts.clean_dataset --gpu --min-iou 0.10
     python -m scripts.clean_dataset --gpu --datasets cord naf
-    python -m scripts.clean_dataset --gpu --resume          # continue after crash
+    python -m scripts.clean_dataset --gpu --resume
 """
 
 from __future__ import annotations
@@ -35,7 +20,6 @@ import gc
 import json
 import os
 import sys
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -44,20 +28,21 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.common import read_jsonl
-from scripts.ocr_backend import EASYOCR_SCRIPT_GROUPS, polys_to_mask
+from scripts.ocr_backend import (
+    get_reader,
+    detect_boxes,
+    polys_to_mask,
+    mask_iou,
+    _resize_for_ocr,
+    MAX_OCR_SIDE,
+)
 
-# ── helpers ───────────────────────────────────────────────────────────────────
 
-
-def _load_mask_upscaled(mask_path: str, target_wh) -> np.ndarray:
+def _load_mask_at_ocr_size(mask_path: str, ocr_wh: tuple) -> np.ndarray:
     mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
     if mask is None:
-        return np.zeros((target_wh[1], target_wh[0]), dtype=np.uint8)
-    return cv2.resize(mask, target_wh, interpolation=cv2.INTER_NEAREST)
-
-
-def _frac(mask: np.ndarray) -> float:
-    return float((mask > 127).sum()) / float(mask.size) if mask.size else 0.0
+        return np.zeros((ocr_wh[1], ocr_wh[0]), dtype=np.uint8)
+    return cv2.resize(mask, ocr_wh, interpolation=cv2.INTER_NEAREST)
 
 
 def _flush_gpu():
@@ -72,123 +57,173 @@ def _flush_gpu():
     gc.collect()
 
 
-def _load_reader(group: list, gpu: bool):
-    import easyocr
-
-    return easyocr.Reader(group, gpu=gpu, verbose=False, download_enabled=True)
+# ── Pass 0: corruption (CPU, no OCR) ─────────────────────────────────────────
 
 
-def _unload_reader(reader) -> None:
-    try:
-        del reader.detector
-    except Exception:
-        pass
-    try:
-        del reader.recognizer
-    except Exception:
-        pass
-    del reader
-    _flush_gpu()
+def _corruption_check(records, processed_dir, decisions, dry_run):
+    print("\nPass 0: corruption check (CPU, no OCR)...")
+    n = 0
+    for rec in tqdm(records, desc="corruption check"):
+        if rec["id"] in decisions:
+            continue
+        ds = rec["dataset"]
+        base = os.path.join(processed_dir, ds)
+        img_path = os.path.join(base, rec["image_path"])
+        mask_path = os.path.join(base, rec["mask_path"])
+
+        reason = None
+        if not os.path.exists(img_path):
+            reason = "corrupt-missing-image"
+        elif not os.path.exists(mask_path):
+            reason = "corrupt-missing-mask"
+        else:
+            try:
+                with Image.open(img_path) as im:
+                    im.verify()
+            except Exception:
+                reason = "corrupt-bad-header"
+            if not reason:
+                try:
+                    with Image.open(img_path) as im:
+                        im.load()
+                except Exception:
+                    reason = "corrupt-truncated"
+            if not reason:
+                try:
+                    m = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                    if m is None or m.size == 0:
+                        reason = "corrupt-bad-mask"
+                except Exception:
+                    reason = "corrupt-bad-mask"
+
+        if reason:
+            decisions[rec["id"]] = reason
+            n += 1
+            if not dry_run:
+                for p in (img_path, mask_path):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+
+    print(f"  {n} corrupt samples" + (" (dry-run)" if dry_run else " deleted"))
+    return n
 
 
-# ── OCR one image with one reader, return delta ───────────────────────────────
+# ── Pass 1: IoU scoring with detector-only CRAFT ─────────────────────────────
 
 
-def _ocr_delta(
-    img_path: str,
-    mask_path: str,
-    processed_dir: str,
-    rec: dict,
-    reader,
-    min_conf: float,
-) -> Optional[float]:
-    """Return (ocr_frac - stored_mask_frac), or None on error."""
+def _score_sample(
+    rec, processed_dir, reader, text_threshold, low_text, link_threshold
+) -> float | None:
     ds = rec["dataset"]
     base = os.path.join(processed_dir, ds)
-    full_img_path = os.path.join(base, rec["image_path"])
-    full_mask_path = os.path.join(base, rec["mask_path"])
+    img_path = os.path.join(base, rec["image_path"])
+    mask_path = os.path.join(base, rec["mask_path"])
 
     try:
-        img = Image.open(full_img_path).convert("RGB")
-        w, h = img.size
-        arr = np.array(img)
+        img = Image.open(img_path).convert("RGB")
+        arr, scale = _resize_for_ocr(img)
+        ocr_w, ocr_h = arr.shape[1], arr.shape[0]
         img.close()
         del img
-    except Exception:
-        return None
 
-    try:
-        stored_mask = _load_mask_upscaled(full_mask_path, (w, h))
-        stored_frac = _frac(stored_mask)
-        del stored_mask
+        stored_mask = _load_mask_at_ocr_size(mask_path, (ocr_w, ocr_h))
 
-        results = reader.readtext(arr, detail=1, paragraph=False)
-        del arr
+        polys, _ = (
+            detect_boxes.__wrapped__(
+                arr, scale, reader, text_threshold, low_text, link_threshold
+            )
+            if hasattr(detect_boxes, "__wrapped__")
+            else _detect_raw(
+                arr, scale, reader, text_threshold, low_text, link_threshold
+            )
+        )
 
-        polys = []
-        for bbox, text, conf in results:
-            if conf >= min_conf:
-                polys.append(np.array(bbox, dtype=np.float32))
-
-        ocr_mask = polys_to_mask(polys, (w, h))
-        ocr_frac = _frac(ocr_mask)
-        del ocr_mask, polys
-
-        return ocr_frac - stored_frac
+        det_mask = polys_to_mask(polys, (ocr_w, ocr_h))
+        iou = mask_iou(stored_mask, det_mask)
+        del arr, stored_mask, det_mask, polys
+        return iou
     except Exception as e:
         return None
 
 
-# ── checkpoint helpers ────────────────────────────────────────────────────────
+def _detect_raw(arr, scale, reader, text_threshold, low_text, link_threshold):
+    """Inline detection to avoid re-resizing (arr already at OCR size)."""
+    polys = []
+    try:
+        result = reader.detect(
+            arr,
+            text_threshold=text_threshold,
+            low_text=low_text,
+            link_threshold=link_threshold,
+        )
+        if result and len(result) >= 2:
+            free_boxes = result[1]
+            horiz_boxes = result[0]
+            boxes = free_boxes[0] if free_boxes and free_boxes[0] else None
+            if boxes is None and horiz_boxes and horiz_boxes[0]:
+                for b in horiz_boxes[0]:
+                    x0, x1, y0, y1 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
+                    polys.append(
+                        np.array(
+                            [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=np.float32
+                        )
+                        / scale
+                    )
+            elif boxes:
+                for b in boxes:
+                    polys.append(np.array(b, dtype=np.float32) / scale)
+    except Exception:
+        pass
+    return polys, scale
 
 
-def _checkpoint_path(report_path: str) -> str:
-    return report_path.replace(".jsonl", "_checkpoint.json")
+# ── checkpoint / manifest ────────────────────────────────────────────────────
 
 
-def _load_checkpoint(ckpt_path: str) -> dict:
-    if os.path.exists(ckpt_path):
+def _ckpt_path(report):
+    return report.replace(".jsonl", "_checkpoint.json")
+
+
+def _load_ckpt(p):
+    if os.path.exists(p):
         try:
-            with open(ckpt_path) as f:
+            with open(p) as f:
                 return json.load(f)
-        except Exception:
+        except:
             pass
-    return {}  # sample_id -> "miss" | "extra" | "ok"
+    return {}
 
 
-def _save_checkpoint(ckpt_path: str, decisions: dict):
-    os.makedirs(os.path.dirname(ckpt_path) or ".", exist_ok=True)
-    with open(ckpt_path, "w") as f:
-        json.dump(decisions, f)
+def _save_ckpt(p, d):
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    with open(p, "w") as f:
+        json.dump(d, f)
 
 
-# ── manifest rewriting ────────────────────────────────────────────────────────
-
-
-def _update_manifests(processed_dir: str, datasets: list[str]):
-    manifest_path = os.path.join(processed_dir, "manifest.jsonl")
-    if not os.path.exists(manifest_path):
+def _update_manifests(processed_dir, datasets):
+    mp = os.path.join(processed_dir, "manifest.jsonl")
+    if not os.path.exists(mp):
         return
-    all_records = read_jsonl(manifest_path)
-    surviving = [
+    alive = [
         r
-        for r in all_records
+        for r in read_jsonl(mp)
         if os.path.exists(os.path.join(processed_dir, r["dataset"], r["image_path"]))
     ]
-    with open(manifest_path, "w") as f:
-        for r in surviving:
+    with open(mp, "w") as f:
+        for r in alive:
             f.write(json.dumps(r) + "\n")
     for ds in datasets:
-        meta_path = os.path.join(processed_dir, ds, "meta.jsonl")
-        if not os.path.exists(meta_path):
+        dp = os.path.join(processed_dir, ds, "meta.jsonl")
+        if not os.path.exists(dp):
             continue
-        recs = read_jsonl(meta_path)
         kept = [
             r
-            for r in recs
+            for r in read_jsonl(dp)
             if os.path.exists(os.path.join(processed_dir, ds, r["image_path"]))
         ]
-        with open(meta_path, "w") as f:
+        with open(dp, "w") as f:
             for r in kept:
                 f.write(json.dumps(r) + "\n")
 
@@ -202,195 +237,126 @@ def main():
     )
     ap.add_argument("--processed", default="data/processed")
     ap.add_argument("--datasets", nargs="+", default=None)
-    ap.add_argument(
-        "--backend",
-        default="easyocr",
-        choices=["easyocr"],  # paddleocr handles memory differently
-        help="only easyocr supported here (paddleocr: use --backend paddleocr at your own risk)",
-    )
     ap.add_argument("--gpu", action="store_true")
-    ap.add_argument("--min-conf", type=float, default=0.3)
     ap.add_argument(
-        "--max-miss-delta",
+        "--min-iou",
         type=float,
-        default=0.35,
-        help="flag if OCR coverage - mask coverage > this  (default 0.35)",
+        default=0.15,
+        help="delete if IoU(stored_mask, detector_mask) < this. "
+        "Start with 0.10 and look at clean_report.jsonl to calibrate. "
+        "(default 0.15)",
     )
     ap.add_argument(
-        "--max-extra-delta",
+        "--text-threshold",
         type=float,
-        default=-0.40,
-        help="flag if OCR coverage - mask coverage < this  (default -0.40)",
+        default=0.7,
+        help="CRAFT text confidence threshold (default 0.7). "
+        "Lower → more detections / more recall.",
+    )
+    ap.add_argument(
+        "--low-text",
+        type=float,
+        default=0.4,
+        help="CRAFT low-bound score (default 0.4)",
+    )
+    ap.add_argument(
+        "--link-threshold",
+        type=float,
+        default=0.4,
+        help="CRAFT link threshold (default 0.4)",
     )
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument(
-        "--resume",
-        action="store_true",
-        help="load checkpoint and skip already-processed samples",
-    )
+    ap.add_argument("--resume", action="store_true")
     ap.add_argument("--report", default="data/processed/clean_report.jsonl")
     args = ap.parse_args()
 
-    manifest_path = os.path.join(args.processed, "manifest.jsonl")
-    if not os.path.exists(manifest_path):
-        print(f"No manifest.jsonl at {manifest_path}. Run build_dataset.py first.")
+    mp = os.path.join(args.processed, "manifest.jsonl")
+    if not os.path.exists(mp):
+        print(f"No manifest.jsonl at {mp}")
         sys.exit(1)
 
-    all_records = read_jsonl(manifest_path)
-    records = [
-        r for r in all_records if not args.datasets or r["dataset"] in args.datasets
-    ]
+    all_rec = read_jsonl(mp)
+    records = [r for r in all_rec if not args.datasets or r["dataset"] in args.datasets]
     print(
-        f"{len(records)} samples to process across "
+        f"{len(records)} samples across "
         f"{len(set(r['dataset'] for r in records))} dataset(s)"
     )
 
-    ckpt_path = _checkpoint_path(args.report)
-    decisions: dict[str, str] = _load_checkpoint(ckpt_path) if args.resume else {}
+    ckpt = _ckpt_path(args.report)
+    decisions = _load_ckpt(ckpt) if args.resume else {}
     if decisions:
-        print(f"Resuming: {len(decisions)} samples already in checkpoint")
+        print(f"Resuming: {len(decisions)} already decided")
 
-    # Pass 0: corruption check -- fast, no OCR, no GPU.
-    # Catches truncated files, bad headers, unreadable masks before we
-    # waste time loading any OCR model.
-    print("\nPass 0: checking for corrupted / unreadable files...")
-    corrupt_count = 0
-    for rec in tqdm(records, desc="corruption check"):
-        if rec["id"] in decisions:
-            continue
-        ds = rec["dataset"]
-        base = os.path.join(args.processed, ds)
-        img_path = os.path.join(base, rec["image_path"])
-        mask_path = os.path.join(base, rec["mask_path"])
+    # Pass 0: corruption
+    _corruption_check(records, args.processed, decisions, args.dry_run)
+    _save_ckpt(ckpt, decisions)
 
-        reason = None
-
-        # 1. files must exist
-        if not os.path.exists(img_path):
-            reason = "corrupt-missing-image"
-        elif not os.path.exists(mask_path):
-            reason = "corrupt-missing-mask"
-        else:
-            # 2. image must be openable and have valid pixel data
-            try:
-                with Image.open(img_path) as im:
-                    im.verify()  # checks header / EXIF without decoding pixels
-            except Exception:
-                reason = "corrupt-bad-image-header"
-
-            if reason is None:
-                try:
-                    # verify() resets the file; need a fresh open to decode pixels
-                    with Image.open(img_path) as im:
-                        im.load()  # fully decode -- catches truncated data
-                except Exception:
-                    reason = "corrupt-truncated-image"
-
-            # 3. mask must be a readable single-channel PNG
-            if reason is None:
-                try:
-                    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-                    if mask is None:
-                        reason = "corrupt-bad-mask"
-                    elif mask.size == 0:
-                        reason = "corrupt-empty-mask"
-                except Exception:
-                    reason = "corrupt-bad-mask"
-
-        if reason:
-            decisions[rec["id"]] = reason
-            corrupt_count += 1
-            if not args.dry_run:
-                for path in (img_path, mask_path):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-
-    print(
-        f"  Found {corrupt_count} corrupt / unreadable samples"
-        + (" (not deleted, dry-run)" if args.dry_run else " -- deleted")
-    )
-
-    # Pass 1: run each EasyOCR script group one at a time
-    # For each group, scan every sample and accumulate a "worst" verdict per sample.
-    for g_idx, group in enumerate(EASYOCR_SCRIPT_GROUPS):
-        remaining = [r for r in records if r["id"] not in decisions]
-        if not remaining:
-            break
-
+    # Pass 1: detector-only IoU scoring (single reader, all scripts)
+    undecided = [r for r in records if r["id"] not in decisions]
+    if undecided:
         print(
-            f"\n[{g_idx+1}/{len(EASYOCR_SCRIPT_GROUPS)}] "
-            f"Loading reader for group: {group}"
+            f"\nPass 1: IoU scoring with CRAFT detector ({len(undecided)} samples)..."
         )
-        try:
-            reader = _load_reader(group, args.gpu)
-        except Exception as e:
-            print(f"  Failed to load: {e}  -- skipping group")
-            continue
-
-        for rec in tqdm(remaining, desc=f"group {g_idx+1}"):
-            if rec["id"] in decisions:
-                continue  # already flagged by an earlier group
-
-            delta = _ocr_delta(
-                rec["image_path"],
-                rec["mask_path"],
-                args.processed,
+        reader = get_reader(gpu=args.gpu)
+        low_iou = 0
+        for rec in tqdm(undecided, desc="IoU scoring"):
+            iou = _score_sample(
                 rec,
+                args.processed,
                 reader,
-                args.min_conf,
+                args.text_threshold,
+                args.low_text,
+                args.link_threshold,
             )
-            if delta is None:
+            if iou is None:
                 decisions[rec["id"]] = "error"
-            elif delta > args.max_miss_delta:
-                decisions[rec["id"]] = "miss"
-            elif delta < args.max_extra_delta:
-                decisions[rec["id"]] = "extra"
-            # else: don't write "ok" yet -- another group might flag it
+            elif iou < args.min_iou:
+                decisions[rec["id"]] = f"low-iou-{iou:.3f}"
+                low_iou += 1
+            else:
+                decisions[rec["id"]] = "ok"
 
-        # explicitly unload reader and flush GPU before next group
-        print(f"  Unloading reader group {g_idx+1} and flushing memory...")
-        _unload_reader(reader)
-        _save_checkpoint(ckpt_path, decisions)
-        print(f"  Checkpoint saved ({len(decisions)} decisions so far)")
+        del reader
+        _flush_gpu()
+        _save_ckpt(ckpt, decisions)
+        print(f"  {low_iou} samples below IoU threshold {args.min_iou}")
 
-    # fill any remaining undecided samples as "ok"
+    # fill any remaining
     for rec in records:
-        if rec["id"] not in decisions:
-            decisions[rec["id"]] = "ok"
+        decisions.setdefault(rec["id"], "ok")
 
-    # Pass 2: delete flagged samples
+    # Pass 2: delete + report
     counts: dict[str, int] = {}
     report_rows = []
-
     for rec in records:
-        verdict = decisions.get(rec["id"], "ok")
-        counts[verdict] = counts.get(verdict, 0) + 1
-        report_rows.append(
-            {"id": rec["id"], "dataset": rec["dataset"], "result": verdict}
+        v = decisions.get(rec["id"], "ok")
+        bucket = (
+            "ok"
+            if v == "ok"
+            else (
+                "corrupt"
+                if v.startswith("corrupt")
+                else "low-iou" if v.startswith("low-iou") else v
+            )
         )
-
-        is_corrupt = verdict.startswith("corrupt-")
-        is_bad_mask = verdict in ("miss", "extra")
-
-        if (is_bad_mask or is_corrupt) and not args.dry_run:
-            # corruption pass already deleted files; only delete here for OCR verdicts
-            if is_bad_mask:
-                ds = rec["dataset"]
-                base = os.path.join(args.processed, ds)
-                for field in ("image_path", "mask_path"):
-                    try:
-                        os.remove(os.path.join(base, rec[field]))
-                    except OSError:
-                        pass
+        counts[bucket] = counts.get(bucket, 0) + 1
+        report_rows.append({"id": rec["id"], "dataset": rec["dataset"], "result": v})
+        if bucket in ("corrupt", "low-iou", "error") and not args.dry_run:
+            ds = rec["dataset"]
+            base = os.path.join(args.processed, ds)
+            for fld in ("image_path", "mask_path"):
+                try:
+                    os.remove(os.path.join(base, rec[fld]))
+                except OSError:
+                    pass
 
     if not args.dry_run:
-        datasets = args.datasets or list({r["dataset"] for r in records})
-        _update_manifests(args.processed, datasets)
-        # clean up checkpoint now that we're done
-        if os.path.exists(ckpt_path):
-            os.remove(ckpt_path)
+        dsets = args.datasets or list({r["dataset"] for r in records})
+        _update_manifests(args.processed, dsets)
+        try:
+            os.remove(ckpt)
+        except OSError:
+            pass
 
     os.makedirs(os.path.dirname(args.report) or ".", exist_ok=True)
     with open(args.report, "w") as f:
@@ -399,17 +365,11 @@ def main():
 
     mode = "[DRY RUN] " if args.dry_run else ""
     print(f"\n{mode}Results:")
-    print(f"  kept:                    {counts.get('ok', 0)}")
-    print(f"  deleted (missed text):   {counts.get('miss', 0)}")
-    print(f"  deleted (extra/inverted):{counts.get('extra', 0)}")
-    corrupt_total = sum(v for k, v in counts.items() if k.startswith("corrupt-"))
-    if corrupt_total:
-        print(f"  deleted (corrupt):       {corrupt_total}")
-        for k, v in sorted(counts.items()):
-            if k.startswith("corrupt-") and v:
-                print(f"    {k}: {v}")
-    print(f"  errors (OCR failed):     {counts.get('error', 0)}")
-    print(f"  report:                  {args.report}")
+    print(f"  kept:    {counts.get('ok', 0)}")
+    print(f"  low-iou: {counts.get('low-iou', 0)}")
+    print(f"  corrupt: {counts.get('corrupt', 0)}")
+    print(f"  error:   {counts.get('error', 0)}")
+    print(f"  report:  {args.report}")
 
 
 if __name__ == "__main__":

@@ -1,25 +1,19 @@
-"""Thin wrapper around EasyOCR (or PaddleOCR) for text detection.
+"""OCR backend — detection-only mode for mask cleaning.
 
-KEY CONSTRAINT: EasyOCR requires languages to be grouped by script family --
-you cannot mix e.g. Devanagari and CJK in one Reader. This module creates
-multiple specialised Readers and runs them in sequence, merging results.
+KEY INSIGHT: for cleaning (we only need WHERE text is, not WHAT it says),
+we use EasyOCR in DETECTOR-ONLY mode:
+  reader = easyocr.Reader(['en'], recognizer=False)
+  boxes, _ = reader.detect(image_array)
 
-Supported language coverage by script family:
-  Latin:      en, id (Indonesian), de, fr, es, pt, nl, it, pl, ...
-  CJK:        ch_sim, ch_tra, ja, ko
-  Devanagari: hi, mr, ne
-  Cyrillic:   ru, bg, uk, be, mn, rs_cyrillic
-  Arabic:     ar, fa, ur, ug
-  Tamil:      ta
-  Telugu:     te
-  Kannada:    kn
-  Bengali:    bn, as (Assamese)
+The CRAFT detector is completely script-agnostic — it finds text in any
+language without a recogniser model. This means:
+  - Only ONE reader needed (no per-script groups)
+  - ~2x faster: no recogniser forward pass
+  - ~half the VRAM: no recogniser model loaded
+  - No language compatibility errors
 
-NOT supported (no model released): ml (Malayalam), pa (Punjabi/Gurmukhi),
-or (Odia), gu (Gujarati). Text in these scripts will be detected at the
-bounding-box level by the shared CRAFT detector (which is script-agnostic)
-but character recognition will be wrong -- good enough for mask generation
-since we only need *where* text is, not *what* it says.
+Images are resized to MAX_OCR_SIDE before detection to avoid GPU OOM.
+Batch size is tunable for GPU throughput.
 """
 
 from __future__ import annotations
@@ -27,119 +21,88 @@ from typing import List, Tuple
 import numpy as np
 from PIL import Image
 
-# ── Script family groupings (EasyOCR constraint) ─────────────────────────────
-# Each group can be loaded into a single easyocr.Reader together.
-# 'en' is compatible with every group so we always include it.
-EASYOCR_SCRIPT_GROUPS = [
-    [
-        "en",
-        "id",
-        "de",
-        "fr",
-        "es",
-        "pt",
-        "nl",
-        "it",
-        "pl",
-        "ru",
-        "bg",
-        "uk",
-        "be",
-        "mn",
-        "rs_cyrillic",
-    ],  # Latin + Cyrillic share a detector in EasyOCR
-    ["ch_sim", "ch_tra", "ja", "ko", "en"],  # CJK
-    ["hi", "mr", "ne", "en"],  # Devanagari (Hindi, Marathi, Nepali)
-    ["ta", "en"],  # Tamil
-    ["te", "en"],  # Telugu
-    ["kn", "en"],  # Kannada
-    ["bn", "as", "en"],  # Bengali / Assamese
-    ["ar", "fa", "ur", "ug", "en"],  # Arabic script
-]
+MAX_OCR_SIDE = 1024  # resize long edge to this before CRAFT detection
 
 
-def get_reader(backend: str = "easyocr", gpu: bool = False, langs: list = None):
-    """Return an initialised OCR reader (or list of readers for EasyOCR multi-script).
-
-    For EasyOCR, returns a list of (reader, lang_group) tuples.
-    For PaddleOCR, returns a single reader object.
-    Pass the return value to boxes_from_image() with the same backend.
-    """
-    if backend == "easyocr":
-        import easyocr
-
-        if langs:
-            # single custom group -- caller knows what they're doing
-            return [
-                (
-                    easyocr.Reader(
-                        langs, gpu=gpu, verbose=False, download_enabled=True
-                    ),
-                    langs,
-                )
-            ]
-        readers = []
-        for group in EASYOCR_SCRIPT_GROUPS:
-            try:
-                r = easyocr.Reader(group, gpu=gpu, verbose=False, download_enabled=True)
-                readers.append((r, group))
-            except Exception as e:
-                print(f"[ocr_backend] Warning: could not load group {group}: {e}")
-        return readers
-
-    elif backend == "paddleocr":
-        from paddleocr import PaddleOCR
-
-        return PaddleOCR(
-            use_angle_cls=True, lang="multilingual", use_gpu=gpu, show_log=False
+def _resize_for_ocr(img: Image.Image) -> Tuple[np.ndarray, float]:
+    """Resize to MAX_OCR_SIDE on long side. Returns (rgb_array, scale)."""
+    w, h = img.size
+    scale = min(1.0, MAX_OCR_SIDE / max(w, h))
+    if scale < 1.0:
+        img = img.resize(
+            (max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR
         )
-    else:
-        raise ValueError(f"Unknown backend: {backend!r}. Use 'easyocr' or 'paddleocr'.")
+    return np.array(img.convert("RGB")), scale
 
 
-def boxes_from_image(
-    reader, img: Image.Image, backend: str = "easyocr", min_confidence: float = 0.3
-) -> List[np.ndarray]:
-    """Run OCR on a PIL image, return list of (N,2) float32 polygon arrays.
+def get_reader(gpu: bool = False):
+    """Return a single EasyOCR reader in detector-only mode.
 
-    `reader` should be the object returned by get_reader().
-    For EasyOCR this is a list of (reader, group) tuples.
+    recognizer=False: skips loading all per-script recogniser models.
+    The CRAFT detector works for all scripts with just ['en'].
     """
-    arr = np.array(img.convert("RGB"))
+    import easyocr
+
+    print("  Loading EasyOCR detector (detector-only, no recogniser)...")
+    return easyocr.Reader(
+        ["en"], gpu=gpu, recognizer=False, verbose=False, download_enabled=True
+    )
+
+
+def detect_boxes(
+    reader,
+    img: Image.Image,
+    text_threshold: float = 0.7,
+    low_text: float = 0.4,
+    link_threshold: float = 0.4,
+) -> Tuple[List[np.ndarray], float]:
+    """Run CRAFT detector on a PIL image.
+
+    Returns (polys_in_original_coords, scale).
+    polys: list of (4,2) float32 arrays (word bounding quads).
+    scale: factor applied before detection (divide to get original coords).
+
+    text_threshold / low_text / link_threshold: CRAFT parameters.
+      Lower text_threshold → more detections (more recall, less precision).
+      Raise it to reduce false positives on non-text regions.
+    """
+    arr, scale = _resize_for_ocr(img)
+
+    # reader.detect() returns (horizontal_boxes, free_boxes)
+    # horizontal_boxes: list of [[x_min, x_max, y_min, y_max]] per image
+    # free_boxes: list of [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] quads per image
+    result = reader.detect(
+        arr,
+        text_threshold=text_threshold,
+        low_text=low_text,
+        link_threshold=link_threshold,
+    )
+
     polys = []
-    seen_boxes = set()  # deduplicate boxes across script groups
+    if result and len(result) >= 2:
+        free_boxes = result[1]  # arbitrary quads (better for rotated text)
+        horiz_boxes = result[0]
 
-    if backend == "easyocr":
-        reader_list = reader if isinstance(reader, list) else [reader]
-        for r, _ in reader_list:
-            try:
-                results = r.readtext(arr, detail=1, paragraph=False)
-            except Exception:
-                continue
-            for bbox, text, conf in results:
-                if conf < min_confidence:
-                    continue
-                pts = np.array(bbox, dtype=np.float32)  # shape (4,2)
-                # deduplicate by top-left corner rounded to 5px grid
-                key = (round(pts[0, 0] / 5) * 5, round(pts[0, 1] / 5) * 5)
-                if key not in seen_boxes:
-                    seen_boxes.add(key)
-                    polys.append(pts)
+        # prefer free_boxes (quads); fall back to horizontal boxes
+        boxes_to_use = free_boxes[0] if free_boxes and free_boxes[0] else None
+        if boxes_to_use is None and horiz_boxes and horiz_boxes[0]:
+            # horiz boxes are [x_min, x_max, y_min, y_max]
+            for b in horiz_boxes[0]:
+                x0, x1, y0, y1 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
+                polys.append(
+                    np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=np.float32)
+                    / scale
+                )
+        elif boxes_to_use:
+            for b in boxes_to_use:
+                pts = np.array(b, dtype=np.float32) / scale
+                polys.append(pts)
 
-    elif backend == "paddleocr":
-        results = reader.ocr(arr, cls=True)
-        if results and results[0]:
-            for line in results[0]:
-                bbox, (text, conf) = line
-                if conf < min_confidence:
-                    continue
-                polys.append(np.array(bbox, dtype=np.float32))
-
-    return polys
+    return polys, scale
 
 
 def polys_to_mask(polys: List[np.ndarray], size_wh: Tuple[int, int]) -> np.ndarray:
-    """Rasterise polygon list into a binary 0/255 uint8 mask of shape (H,W)."""
+    """Rasterise polygon list into a binary 0/255 uint8 mask (H,W)."""
     import cv2
 
     w, h = size_wh
@@ -147,3 +110,12 @@ def polys_to_mask(polys: List[np.ndarray], size_wh: Tuple[int, int]) -> np.ndarr
     for p in polys:
         cv2.fillPoly(mask, [p.astype(np.int32).reshape(-1, 1, 2)], 255)
     return mask
+
+
+def mask_iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
+    """IoU of two binary (0/255) masks."""
+    a = mask_a > 127
+    b = mask_b > 127
+    inter = float((a & b).sum())
+    union = float((a | b).sum())
+    return inter / union if union > 0 else 1.0
