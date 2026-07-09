@@ -26,7 +26,7 @@ import os
 import zipfile
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from src.common import Sample
 
@@ -69,6 +69,67 @@ def iter_samples(raw_dir: str = RAW_DIR):
     with open(json_path) as f:
         data = json.load(f)
 
+
+def _exif_orientation(img_path: str) -> int:
+    """Return the EXIF Orientation tag value (1–8), or 1 if absent."""
+    try:
+        with Image.open(img_path) as im:
+            exif = im._getexif()
+            if exif:
+                # tag 274 = Orientation
+                return exif.get(274, 1)
+    except Exception:
+        pass
+    return 1
+
+
+def _rotate_poly(
+    pts: np.ndarray, orientation: int, img_w: int, img_h: int
+) -> np.ndarray:
+    """Transform polygon coordinates to match what ImageOps.exif_transpose() does."""
+    # EXIF orientation → (transpose_method, affects_dims)
+    # We need to map from original pixel coords → coords in transposed image.
+    x, y = pts[:, 0].copy(), pts[:, 1].copy()
+    if orientation == 1:
+        pass  # no-op
+    elif orientation == 2:
+        x = img_w - 1 - x  # flip horizontal
+    elif orientation == 3:
+        x = img_w - 1 - x  # rotate 180
+        y = img_h - 1 - y
+    elif orientation == 4:
+        y = img_h - 1 - y  # flip vertical
+    elif orientation == 5:
+        x, y = y, x  # transpose (flip over main diagonal)
+    elif orientation == 6:
+        x, y = img_h - 1 - y, x  # rotate 90 CW
+    elif orientation == 7:
+        x, y = y, img_w - 1 - x  # transverse
+    elif orientation == 8:
+        x, y = y, img_w - 1 - x  # rotate 90 CCW
+        x, y = img_h - 1 - x, y  # (two-step for 8)
+    return np.stack([x, y], axis=1).astype(np.float32)
+
+
+def iter_samples(raw_dir: str = RAW_DIR):
+    detection_dir = os.path.join(raw_dir, "Detection")
+    json_candidates = (
+        [
+            f
+            for f in os.listdir(detection_dir)
+            if f.startswith("BSTD_") and f.endswith(".json")
+        ]
+        if os.path.isdir(detection_dir)
+        else []
+    )
+    if not json_candidates:
+        raise FileNotFoundError(
+            f"No BSTD_*.json found under {detection_dir}. Run `python -m src.datasets.bstd --download` first."
+        )
+    json_path = os.path.join(detection_dir, json_candidates[0])
+    with open(json_path) as f:
+        data = json.load(f)
+
     for key, entry in data.items():
         image_name = entry.get("image_name")
         if not image_name:
@@ -76,16 +137,33 @@ def iter_samples(raw_dir: str = RAW_DIR):
         img_path = os.path.join(detection_dir, image_name)
         if not os.path.exists(img_path):
             continue
+
+        # Read image dimensions and EXIF orientation eagerly (metadata-only, fast).
+        # We need these to correctly rotate polygon coords to match the
+        # post-EXIF-transpose pixel layout.
+        try:
+            with Image.open(img_path) as _im:
+                raw_w, raw_h = _im.size
+        except Exception:
+            continue
+        orientation = _exif_orientation(img_path)
+
         polys = []
         for poly_entry in (entry.get("annotations") or {}).values():
             coords = poly_entry.get("coordinates")
             if coords and len(coords) >= 3:
-                polys.append(np.array(coords, dtype=np.float32))
+                pts = np.array(coords, dtype=np.float32)
+                if orientation != 1:
+                    pts = _rotate_poly(pts, orientation, raw_w, raw_h)
+                polys.append(pts)
+
         yield Sample(
             sample_id=key,
             image=None,
             polygons=polys,
-            image_loader=lambda p=img_path: Image.open(p).convert("RGB"),
+            image_loader=lambda p=img_path: ImageOps.exif_transpose(
+                Image.open(p)
+            ).convert("RGB"),
         )
 
 

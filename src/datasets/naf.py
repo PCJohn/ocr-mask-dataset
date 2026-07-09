@@ -26,7 +26,7 @@ import tarfile
 
 import numpy as np
 import requests
-from PIL import Image
+from PIL import Image, ImageOps
 from tqdm import tqdm
 
 from src.common import Sample
@@ -146,7 +146,9 @@ def iter_samples(raw_dir: str = RAW_DIR):
             sample_id=base,
             image=None,
             polygons=polys,
-            image_loader=lambda p=img_path: Image.open(p).convert("RGB"),
+            image_loader=lambda p=img_path: ImageOps.exif_transpose(
+                Image.open(p)
+            ).convert("RGB"),
         )
 
 
