@@ -1,59 +1,114 @@
-"""DocLayNet (base/small mirror): real scanned/digital document pages --
-financial reports, manuals, scientific articles, laws/regulations, patents,
-government tenders. Manually annotated (not auto-derived like PubLayNet),
-with genuinely useful LINE-LEVEL boxes via the `bboxes_line` field -- this is
-actually a step up in granularity from PubLayNet/SynSlides, not just another
-block-level dataset. License: CDLA-Permissive-1.0 (commercial use OK).
+"""DocLayNet (base mirror): real scanned/digital document pages.
+License: CDLA-Permissive-1.0 (commercial use OK).
+https://huggingface.co/datasets/pierreguillou/DocLayNet-base
 
-Uses the `pierreguillou/DocLayNet-base` mirror (~10% sample, ~691 train
-images -- small on purpose). Source: https://huggingface.co/datasets/pierreguillou/DocLayNet-base
+KEY SCHEMA (verified from HF dataset viewer + Pierre Guillou's notebooks):
+  `categories`  : List[int]  -- one category id per BLOCK.
+  `bboxes_block`: List[box]  -- one [x,y,w,h] bounding box per block.
+  `bboxes_line` : List[List[box]] -- one LIST of [x,y,w,h] boxes per block,
+                  i.e. bboxes_line[i] is the list of line-level boxes for
+                  the i-th block (same index as categories[i]).
 
-CAVEAT: this HF repo uses a custom dataset loading script (`trust_remote_code=True`
-required), which is the same category of thing that broke on an earlier
-PubLayNet mirror in this project (a stale dataset_infos.json that didn't
-deserialize against a newer `datasets` version). I could not test this one
-live from this environment. Run `python -m src.datasets.doclaynet --check`
-first; if it crashes with a schema/dataclass error like the earlier PubLayNet
-issue, try `pip install -U datasets huggingface_hub` first, and if that
-doesn't fix it, this dataset isn't safe to rely on until the upstream repo
-is patched -- fall back to `pierreguillou/DocLayNet-small` (even smaller) or
-skip it.
+  Previous bug: the code treated bboxes_line[i] as a single [x,y,w,h] box
+  instead of a list of boxes, causing most lines to be silently skipped and
+  producing near-empty or garbage masks on pages with formulas, figures, etc.
+
+  Category ids (integers, NOT strings):
+    1=Caption, 2=Footnote, 3=Formula, 4=List-item, 5=Page-footer,
+    6=Page-header, 7=Picture, 8=Section-header, 9=Table, 10=Text, 11=Title
+
+  All coordinates are in [x, y, w, h] COCO format at coco_width×coco_height
+  scale (1025×1025 px).
+
+  We use bboxes_line (line-level) for fine-grained masks. Falls back to
+  bboxes_block (block-level) when a block has no line boxes.
+  NOT marked coarse -- line boxes don't need Otsu refinement.
 """
-import argparse
 
-import numpy as np
+import argparse
 
 from src.common import Sample, box_to_polygon
 
 HF_NAME = "pierreguillou/DocLayNet-base"
 
-# DocLayNet's 11 category names. "Picture" is pure image content, excluded
-# always. "Table" contains text but as a whole-table region -- excluded by
-# default for the same reason as PubLayNet's table category; flip
-# INCLUDE_TABLE to True if you'd rather keep it.
-EXCLUDE_CATEGORIES = {"Picture"}
+# Category ids to EXCLUDE from the text mask.
+# 7=Picture: pure image content, always excluded.
+# 9=Table: whole-table region, no per-cell breakdown; excluded by default.
+EXCLUDE_CATEGORY_IDS = {7}
 INCLUDE_TABLE = False
 if not INCLUDE_TABLE:
-    EXCLUDE_CATEGORIES.add("Table")
+    EXCLUDE_CATEGORY_IDS.add(9)
+
+
+def _box_to_poly(box):
+    """[x, y, w, h] -> polygon. Returns None if degenerate."""
+    if not box:
+        return None
+    if not hasattr(box, "__len__") or len(box) != 4:
+        return None
+    try:
+        x, y, w, h = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return box_to_polygon(x, y, x + w, y + h)
+
+
+def _parse_line_boxes(raw):
+    """bboxes_line[i] can be shaped either as:
+      - a list of [x,y,w,h] sub-lists  → [[x,y,w,h], [x,y,w,h], ...]
+      - a flat single box               → [x, y, w, h]  (ints, not nested)
+    Detect by checking whether the first element is itself a list/sequence.
+    """
+    if not raw:
+        return []
+    first = raw[0]
+    if hasattr(first, "__len__"):
+        # nested: each element is one [x,y,w,h] box
+        return raw
+    else:
+        # flat: the whole thing is one [x,y,w,h] box
+        return [raw]
 
 
 def iter_samples(split: str = "train"):
     from datasets import load_dataset
+
     ds = load_dataset(HF_NAME, split=split, trust_remote_code=True)
     for i, ex in enumerate(ds):
         img = ex["image"].convert("RGB")
+
+        categories = ex.get("categories") or []
+        bboxes_line = ex.get("bboxes_line") or []
+        bboxes_block = ex.get("bboxes_block") or []
+
         polys = []
-        categories = ex.get("categories", [])
-        line_boxes = ex.get("bboxes_line", [])
-        for cat, box in zip(categories, line_boxes):
-            if cat in EXCLUDE_CATEGORIES:
+        for idx, cat_id in enumerate(categories):
+            if cat_id in EXCLUDE_CATEGORY_IDS:
                 continue
-            if box and len(box) == 4:
-                x0, y0, x1, y1 = box
-                polys.append(box_to_polygon(x0, y0, x1, y1))
-        # bboxes_line is already line-level, not a whole paragraph/element block --
-        # so unlike publaynet/synslides this one is NOT marked coarse.
-        yield Sample(sample_id=f"{split}_{i:05d}", image=img, polygons=polys, coarse=False)
+
+            # bboxes_line[idx] may be nested [[x,y,w,h],...] or flat [x,y,w,h]
+            line_boxes = _parse_line_boxes(
+                bboxes_line[idx] if idx < len(bboxes_line) else []
+            )
+
+            if line_boxes:
+                for box in line_boxes:
+                    p = _box_to_poly(box)
+                    if p is not None:
+                        polys.append(p)
+            else:
+                # fallback: use the block box when line boxes are absent
+                block_box = bboxes_block[idx] if idx < len(bboxes_block) else None
+                p = _box_to_poly(block_box)
+                if p is not None:
+                    polys.append(p)
+
+        # Line-level boxes: NOT coarse, no Otsu refinement needed.
+        yield Sample(
+            sample_id=f"{split}_{i:05d}", image=img, polygons=polys, coarse=False
+        )
 
 
 if __name__ == "__main__":
@@ -66,7 +121,11 @@ if __name__ == "__main__":
         for s in iter_samples():
             n += 1
             if n == 1:
-                print(f"First sample: {s.sample_id}, {len(s.polygons)} polygons, image size {s.image.size}")
+                print(
+                    f"First sample: {s.sample_id}, {len(s.polygons)} polygons, image {s.image.size}"
+                )
+                if s.polygons:
+                    print(f"  First polygon: {s.polygons[0]}")
             if n >= 5:
                 break
         print(f"Loaded {n} DocLayNet samples OK.")
