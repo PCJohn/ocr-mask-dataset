@@ -97,9 +97,44 @@ def iter_samples(cache_dir: str = CACHE_DIR):
             yield Sample(sample_id=f"{split}_{i:05d}", image=img, polygons=polys)
 
 
+def _debug(cache_dir: str = CACHE_DIR, n_samples: int = 3):
+    from datasets import load_dataset
+    import json
+
+    ds = load_dataset(HF_NAME, cache_dir=cache_dir)
+    split = list(ds.keys())[0]
+    print(f"Splits: {list(ds.keys())}  |  using split='{split}'")
+    for i, ex in enumerate(ds[split]):
+        gt = json.loads(ex.get("ground_truth") or "{}")
+        lines = gt.get("valid_line", [])
+        all_words = [w for l in lines for w in l.get("words", [])]
+        img_w, img_h = ex["image"].size
+        quads_kept = _quads_from_ground_truth(ex["ground_truth"], img_w)
+        quads_total = sum(1 for l in lines for w in l.get("words", []) if w.get("quad"))
+        dropped = quads_total - len(quads_kept)
+        print(
+            f"\n  sample {i}: image={img_w}x{img_h}  lines={len(lines)}  words={len(all_words)}"
+        )
+        print(
+            f"    quads_total={quads_total}  kept={len(quads_kept)}  dropped_as_vertical_banner={dropped}"
+        )
+        if all_words:
+            q = all_words[0].get("quad", {})
+            print(f"    first word quad keys: {list(q.keys())}  values: {q}")
+        if i + 1 >= n_samples:
+            break
+    print("\nExpected: quads_kept > 0 for most samples. dropped should be small (0–5).")
+    print("If quads_kept=0 everywhere, the quad key names may have changed.")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--download", action="store_true")
+    p.add_argument(
+        "--debug", action="store_true", help="inspect raw schema of first few samples"
+    )
     args = p.parse_args()
     if args.download:
         download()
+    if args.debug:
+        _debug()

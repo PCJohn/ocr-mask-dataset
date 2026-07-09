@@ -150,9 +150,47 @@ def iter_samples(raw_dir: str = RAW_DIR):
         )
 
 
+def _debug(raw_dir=RAW_DIR, n_samples: int = 3):
+    import glob, json, os
+
+    groups_dir = os.path.join(raw_dir, "groups")
+    img_dir = os.path.join(raw_dir, "imgs")
+    if not os.path.isdir(groups_dir):
+        print(f"Groups dir not found: {groups_dir}  -- run --download first")
+        return
+    ann_paths = sorted(glob.glob(os.path.join(groups_dir, "*", "*.json")))[:n_samples]
+    for ann_path in ann_paths:
+        with open(ann_path) as f:
+            ann = json.load(f)
+        text_bbs = ann.get("textBBs", [])
+        field_bbs = ann.get("fieldBBs", [])
+        print(f"\n  {os.path.basename(ann_path)}")
+        print(f"    textBBs:  {len(text_bbs)} entries")
+        if text_bbs:
+            t = text_bbs[0]
+            print(
+                f"      [0] keys={list(t.keys())}  type={t.get('type')}  poly_points={t.get('poly_points', 'MISSING')[:1] if t.get('poly_points') else 'MISSING'}"
+            )
+        print(f"    fieldBBs: {len(field_bbs)} entries")
+        if field_bbs:
+            f0 = field_bbs[0]
+            print(
+                f"      [0] keys={list(f0.keys())}  type={f0.get('type')}  isBlank={f0.get('isBlank')}  poly_points present={bool(f0.get('poly_points'))}"
+            )
+        polys = _polys_from_json(ann_path)
+        print(f"    → _polys_from_json yields {len(polys)} polygons")
+    print("\nExpected: polygons > 0. isBlank values should be 0/1/2/3/4.")
+    print("If poly_points=MISSING or type names differ, the schema has changed.")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--download", action="store_true")
+    p.add_argument(
+        "--debug", action="store_true", help="inspect raw schema of first few samples"
+    )
     args = p.parse_args()
     if args.download:
         download()
+    if args.debug:
+        _debug()

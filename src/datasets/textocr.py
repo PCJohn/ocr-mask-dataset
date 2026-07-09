@@ -111,9 +111,49 @@ def iter_samples(raw_dir: str = RAW_DIR):
     yield from _iter_split(raw_dir, "val", "TextOCR_0.1_val.json")
 
 
+def _debug(raw_dir=RAW_DIR, n_samples: int = 3):
+    import json, os
+
+    json_path = os.path.join(raw_dir, "TextOCR_0.1_train.json")
+    if not os.path.exists(json_path):
+        print(f"Annotation file not found: {json_path}  -- run --download first")
+        return
+    with open(json_path) as f:
+        data = json.load(f)
+    print(f"Top-level keys: {list(data.keys())}")
+    imgs = data.get("imgs", {})
+    anns = data.get("anns", {})
+    img_to_anns = data.get("imgToAnns", {})
+    print(f"imgs={len(imgs)}  anns={len(anns)}  imgToAnns entries={len(img_to_anns)}")
+    for j, (img_id, img_info) in enumerate(list(imgs.items())[:n_samples]):
+        ann_ids = img_to_anns.get(img_id, [])
+        sample_anns = [anns[aid] for aid in ann_ids if aid in anns]
+        print(
+            f"\n  img_id={img_id}  file_name={img_info.get('file_name')}  w={img_info.get('width')}  h={img_info.get('height')}"
+        )
+        print(f"    ann_ids={len(ann_ids)}  resolved_anns={len(sample_anns)}")
+        if sample_anns:
+            a0 = sample_anns[0]
+            print(f"    ann[0] keys: {list(a0.keys())}")
+            pts = a0.get("points")
+            print(
+                f"    ann[0] points type={type(pts).__name__}  len={len(pts) if pts else 0}  first4={pts[:4] if pts else 'MISSING'}"
+            )
+            print(f"    ann[0] utf8_string={repr(a0.get('utf8_string', ''))[:40]}")
+        if j + 1 >= n_samples:
+            break
+    print("\nExpected: points is a flat list of numbers [x1,y1,x2,y2,...] len>=6.")
+    print("If points is MISSING or empty, the key name may differ from 'points'.")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--download", action="store_true")
+    p.add_argument(
+        "--debug", action="store_true", help="inspect raw schema of first few samples"
+    )
     args = p.parse_args()
     if args.download:
         download()
+    if args.debug:
+        _debug()

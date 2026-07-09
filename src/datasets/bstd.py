@@ -89,9 +89,55 @@ def iter_samples(raw_dir: str = RAW_DIR):
         )
 
 
+def _debug(raw_dir=RAW_DIR, n_samples: int = 3):
+    import json, os, glob
+
+    detection_dir = os.path.join(raw_dir, "Detection")
+    json_candidates = (
+        [
+            f
+            for f in os.listdir(detection_dir)
+            if f.startswith("BSTD_") and f.endswith(".json")
+        ]
+        if os.path.isdir(detection_dir)
+        else []
+    )
+    if not json_candidates:
+        print(f"No BSTD_*.json in {detection_dir}  -- run --download first")
+        return
+    json_path = os.path.join(detection_dir, json_candidates[0])
+    with open(json_path) as f:
+        data = json.load(f)
+    print(f"Top-level type: {type(data).__name__}")
+    items = list(data.items())[:n_samples]
+    for key, entry in items:
+        image_name = entry.get("image_name", "MISSING")
+        anns = entry.get("annotations") or {}
+        ann_vals = list(anns.values()) if isinstance(anns, dict) else anns
+        print(f"\n  key={key}  image_name={image_name}  annotations={len(ann_vals)}")
+        if ann_vals:
+            a0 = ann_vals[0]
+            print(f"    ann[0] keys: {list(a0.keys())}")
+            coords = a0.get("coordinates")
+            lang = a0.get("language", a0.get("lang", "MISSING"))
+            print(
+                f"    coordinates type={type(coords).__name__}  len={len(coords) if coords else 0}  first_point={coords[0] if coords else 'MISSING'}"
+            )
+            print(f"    language field: {lang}")
+    print(
+        "\nExpected: coordinates is a list of [x,y] points (>=3 for a valid polygon)."
+    )
+    print("If coordinates is MISSING or empty, check the JSON key name.")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--download", action="store_true")
+    p.add_argument(
+        "--debug", action="store_true", help="inspect raw schema of first few samples"
+    )
     args = p.parse_args()
     if args.download:
         download()
+    if args.debug:
+        _debug()

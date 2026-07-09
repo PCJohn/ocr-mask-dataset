@@ -92,6 +92,41 @@ def iter_samples(limit: int = DEFAULT_LIMIT, split: str = "train"):
         yielded += 1
 
 
+def _debug(n_samples: int = 3):
+    from datasets import load_dataset
+
+    ds = load_dataset(HF_NAME, split="train", streaming=True)
+    for i, ex in enumerate(ds):
+        anns = ex.get("annotations") or []
+        cats = [a.get("category_id") for a in anns]
+        has_fig = FIGURE_CATEGORY_ID in cats
+        text_anns = [a for a in anns if a.get("category_id") in TEXT_CATEGORY_IDS]
+        print(
+            f"\n  sample {i}: image={ex['image'].size}  total_anns={len(anns)}  has_figure={has_fig}"
+        )
+        print(f"    category_ids present: {sorted(set(cats))}")
+        print(f"    text/title/list anns: {len(text_anns)}")
+        if anns:
+            a0 = anns[0]
+            print(f"    ann[0] keys: {list(a0.keys())}")
+            print(f"    ann[0] bbox: {a0.get('bbox')}  (should be [x,y,w,h])")
+            seg = a0.get("segmentation")
+            print(
+                f"    ann[0] segmentation present: {bool(seg)}  type={type(seg).__name__}  len={len(seg) if seg else 0}"
+            )
+            if seg:
+                print(
+                    f"      seg[0] type={type(seg[0]).__name__}  first5={list(seg[0])[:5] if hasattr(seg[0],'__iter__') else seg[0]}"
+                )
+        if i + 1 >= n_samples:
+            break
+    print("\nExpected: text_anns > 0 on most non-figure pages.")
+    print(
+        "samples with has_figure=True are SKIPPED during build. If most pages have figures,"
+    )
+    print("set SKIP_SAMPLES_WITH_FIGURE=False in publaynet.py.")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
@@ -101,7 +136,12 @@ if __name__ == "__main__":
         action="store_true",
         help="alias for --check; dataset is streamed on demand",
     )
+    p.add_argument(
+        "--debug", action="store_true", help="inspect raw schema of first few samples"
+    )
     args = p.parse_args()
-    if args.check or args.download:
+    if args.debug:
+        _debug()
+    elif args.check or args.download:
         n = sum(1 for _ in iter_samples(limit=min(args.limit, 5)))
         print(f"Streamed {n} PubLayNet samples OK.")
