@@ -142,9 +142,12 @@ def iter_samples(raw_dir: str = RAW_DIR):
             continue
         img_path = candidates[0]
         polys = _polys_from_json(ann_path)
-        with Image.open(img_path) as im:
-            img = im.convert("RGB")
-        yield Sample(sample_id=base, image=img, polygons=polys)
+        yield Sample(
+            sample_id=base,
+            image=None,
+            polygons=polys,
+            image_loader=lambda p=img_path: Image.open(p).convert("RGB"),
+        )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ streamable shards -- it's a one-time download, but it's not itself "small".
 Use --limit in build_dataset.py to cap how many of the *processed* (resized,
 masked) images you keep once it's unpacked.
 """
+
 import argparse
 import json
 import os
@@ -25,8 +26,12 @@ from src.common import Sample
 
 RAW_DIR = "data/raw/textocr"
 IMAGES_ZIP_URL = "https://dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip"
-TRAIN_JSON_URL = "https://dl.fbaipublicfiles.com/textvqa/data/textocr/TextOCR_0.1_train.json"
-VAL_JSON_URL = "https://dl.fbaipublicfiles.com/textvqa/data/textocr/TextOCR_0.1_val.json"
+TRAIN_JSON_URL = (
+    "https://dl.fbaipublicfiles.com/textvqa/data/textocr/TextOCR_0.1_train.json"
+)
+VAL_JSON_URL = (
+    "https://dl.fbaipublicfiles.com/textvqa/data/textocr/TextOCR_0.1_val.json"
+)
 
 
 def _download_file(url: str, dest: str):
@@ -64,14 +69,18 @@ def _iter_split(raw_dir: str, split: str, json_name: str):
         return
     with open(json_path) as f:
         data = json.load(f)
-    imgs = data["imgs"]          # img_id -> {"file_name": ..., "width":..., "height":...}
-    anns = data["anns"]          # ann_id -> {"image_id":..., "points": [x1,y1,...]}
+    imgs = data["imgs"]  # img_id -> {"file_name": ..., "width":..., "height":...}
+    anns = data["anns"]  # ann_id -> {"image_id":..., "points": [x1,y1,...]}
     img_to_anns = data.get("imgToAnns", {})
 
     for img_id, img_info in imgs.items():
         file_name = img_info.get("file_name") or f"{img_id}.jpg"
-        img_path = os.path.join(raw_dir, file_name) if os.path.isabs(file_name) is False \
-            and os.path.exists(os.path.join(raw_dir, file_name)) else os.path.join(raw_dir, "train_images", os.path.basename(file_name))
+        img_path = (
+            os.path.join(raw_dir, file_name)
+            if os.path.isabs(file_name) is False
+            and os.path.exists(os.path.join(raw_dir, file_name))
+            else os.path.join(raw_dir, "train_images", os.path.basename(file_name))
+        )
         if not os.path.exists(img_path):
             # some releases store paths already relative to train_images/
             alt = os.path.join(raw_dir, file_name)
@@ -89,9 +98,12 @@ def _iter_split(raw_dir: str, split: str, json_name: str):
             if pts and len(pts) >= 6:
                 polys.append(np.array(pts, dtype=np.float32).reshape(-1, 2))
 
-        with Image.open(img_path) as im:
-            img = im.convert("RGB")
-        yield Sample(sample_id=f"{split}_{img_id}", image=img, polygons=polys)
+        yield Sample(
+            sample_id=f"{split}_{img_id}",
+            image=None,
+            polygons=polys,
+            image_loader=lambda p=img_path: Image.open(p).convert("RGB"),
+        )
 
 
 def iter_samples(raw_dir: str = RAW_DIR):

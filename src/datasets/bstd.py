@@ -19,6 +19,7 @@ archive so there's no partial/streamed download; budget disk + time
 accordingly. Use --limit in build_dataset.py to cap how many *processed*
 images you keep once it's unpacked.
 """
+
 import argparse
 import json
 import os
@@ -35,6 +36,7 @@ GDRIVE_FILE_ID = "1S7KUYfB-lQvbu6GtvZxxDPOD5ZZ080M0"  # detection.zip
 
 def download(raw_dir: str = RAW_DIR):
     import gdown
+
     os.makedirs(raw_dir, exist_ok=True)
     zip_path = os.path.join(raw_dir, "detection.zip")
     extract_dir = os.path.join(raw_dir, "Detection")
@@ -50,8 +52,15 @@ def download(raw_dir: str = RAW_DIR):
 
 def iter_samples(raw_dir: str = RAW_DIR):
     detection_dir = os.path.join(raw_dir, "Detection")
-    json_candidates = [f for f in os.listdir(detection_dir) if f.startswith("BSTD_") and f.endswith(".json")] \
-        if os.path.isdir(detection_dir) else []
+    json_candidates = (
+        [
+            f
+            for f in os.listdir(detection_dir)
+            if f.startswith("BSTD_") and f.endswith(".json")
+        ]
+        if os.path.isdir(detection_dir)
+        else []
+    )
     if not json_candidates:
         raise FileNotFoundError(
             f"No BSTD_*.json found under {detection_dir}. Run `python -m src.datasets.bstd --download` first."
@@ -72,9 +81,12 @@ def iter_samples(raw_dir: str = RAW_DIR):
             coords = poly_entry.get("coordinates")
             if coords and len(coords) >= 3:
                 polys.append(np.array(coords, dtype=np.float32))
-        with Image.open(img_path) as im:
-            img = im.convert("RGB")
-        yield Sample(sample_id=key, image=img, polygons=polys)
+        yield Sample(
+            sample_id=key,
+            image=None,
+            polygons=polys,
+            image_loader=lambda p=img_path: Image.open(p).convert("RGB"),
+        )
 
 
 if __name__ == "__main__":
