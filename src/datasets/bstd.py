@@ -138,24 +138,43 @@ def iter_samples(raw_dir: str = RAW_DIR):
         if not os.path.exists(img_path):
             continue
 
-        # Read image dimensions and EXIF orientation eagerly (metadata-only, fast).
-        # We need these to correctly rotate polygon coords to match the
-        # post-EXIF-transpose pixel layout.
+        # Load and immediately apply EXIF transpose so we work in display space.
+        # BSTD annotations were made on the correctly-oriented display image,
+        # so we must match that orientation before using coordinates.
         try:
             with Image.open(img_path) as _im:
                 raw_w, raw_h = _im.size
+                orientation = _exif_orientation(img_path)
         except Exception:
             continue
-        orientation = _exif_orientation(img_path)
+
+        # Compute display-space dimensions after exif_transpose
+        if orientation in (5, 6, 7, 8):
+            display_w, display_h = raw_h, raw_w  # transposed: w and h swap
+        else:
+            display_w, display_h = raw_w, raw_h
 
         polys = []
         for poly_entry in (entry.get("annotations") or {}).values():
             coords = poly_entry.get("coordinates")
-            if coords and len(coords) >= 3:
-                pts = np.array(coords, dtype=np.float32)
-                if orientation != 1:
-                    pts = _rotate_poly(pts, orientation, raw_w, raw_h)
-                polys.append(pts)
+            if not coords or len(coords) < 3:
+                continue
+            pts = np.array(coords, dtype=np.float32)
+
+            # Clamp coordinates to display-space image bounds before rasterising.
+            # Some BSTD annotations have coords slightly outside image bounds due
+            # to annotation tool rounding; unclamped coords cause fillPoly to
+            # produce zero-area polygons.
+            pts[:, 0] = np.clip(pts[:, 0], 0, display_w - 1)
+            pts[:, 1] = np.clip(pts[:, 1], 0, display_h - 1)
+
+            # Apply EXIF rotation to map annotation coords → pixel-layout coords.
+            # exif_transpose on the loaded image undoes this same rotation so
+            # that display_space_coords → pixel_coords → exif_transpose → display.
+            if orientation != 1:
+                pts = _rotate_poly(pts, orientation, raw_w, raw_h)
+
+            polys.append(pts)
 
         yield Sample(
             sample_id=key,

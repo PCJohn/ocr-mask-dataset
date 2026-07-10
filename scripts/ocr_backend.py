@@ -49,55 +49,63 @@ def get_reader(gpu: bool = False):
     )
 
 
-def detect_boxes(
+def detect_text(
     reader,
-    img: Image.Image,
+    img_or_array,
     text_threshold: float = 0.7,
     low_text: float = 0.4,
     link_threshold: float = 0.4,
 ) -> Tuple[List[np.ndarray], float]:
-    """Run CRAFT detector on a PIL image.
+    """Run CRAFT detector. Accepts PIL Image or pre-resized numpy array.
 
     Returns (polys_in_original_coords, scale).
-    polys: list of (4,2) float32 arrays (word bounding quads).
-    scale: factor applied before detection (divide to get original coords).
-
-    text_threshold / low_text / link_threshold: CRAFT parameters.
-      Lower text_threshold → more detections (more recall, less precision).
-      Raise it to reduce false positives on non-text regions.
+    If img_or_array is a PIL Image it will be resized; if it's already a numpy
+    array pass scale explicitly via _detect_raw.
     """
-    arr, scale = _resize_for_ocr(img)
+    if isinstance(img_or_array, Image.Image):
+        arr, scale = _resize_for_ocr(img_or_array)
+    else:
+        arr, scale = img_or_array, 1.0
+    return _detect_raw(arr, scale, reader, text_threshold, low_text, link_threshold)
 
-    # reader.detect() returns (horizontal_boxes, free_boxes)
-    # horizontal_boxes: list of [[x_min, x_max, y_min, y_max]] per image
-    # free_boxes: list of [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] quads per image
-    result = reader.detect(
-        arr,
-        text_threshold=text_threshold,
-        low_text=low_text,
-        link_threshold=link_threshold,
-    )
 
+def _detect_raw(
+    arr: np.ndarray,
+    scale: float,
+    reader,
+    text_threshold: float = 0.7,
+    low_text: float = 0.4,
+    link_threshold: float = 0.4,
+) -> Tuple[List[np.ndarray], float]:
+    """Run CRAFT on a pre-resized numpy array. Scales boxes back by 1/scale.
+    Returns (polys_in_original_coords, scale).
+    """
     polys = []
-    if result and len(result) >= 2:
-        free_boxes = result[1]  # arbitrary quads (better for rotated text)
-        horiz_boxes = result[0]
-
-        # prefer free_boxes (quads); fall back to horizontal boxes
-        boxes_to_use = free_boxes[0] if free_boxes and free_boxes[0] else None
-        if boxes_to_use is None and horiz_boxes and horiz_boxes[0]:
-            # horiz boxes are [x_min, x_max, y_min, y_max]
-            for b in horiz_boxes[0]:
-                x0, x1, y0, y1 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
-                polys.append(
-                    np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=np.float32)
-                    / scale
-                )
-        elif boxes_to_use:
-            for b in boxes_to_use:
-                pts = np.array(b, dtype=np.float32) / scale
-                polys.append(pts)
-
+    try:
+        result = reader.detect(
+            arr,
+            text_threshold=text_threshold,
+            low_text=low_text,
+            link_threshold=link_threshold,
+        )
+        if result and len(result) >= 2:
+            free_boxes = result[1]
+            horiz_boxes = result[0]
+            boxes = free_boxes[0] if free_boxes and free_boxes[0] else None
+            if boxes is None and horiz_boxes and horiz_boxes[0]:
+                for b in horiz_boxes[0]:
+                    x0, x1, y0, y1 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
+                    polys.append(
+                        np.array(
+                            [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=np.float32
+                        )
+                        / scale
+                    )
+            elif boxes:
+                for b in boxes:
+                    polys.append(np.array(b, dtype=np.float32) / scale)
+    except Exception:
+        pass
     return polys, scale
 
 
