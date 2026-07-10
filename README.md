@@ -78,12 +78,10 @@ python -m src.download_all
 python -m src.download_all --datasets cord naf   # skip the ~6.5GB textocr zip
 
 # Build the unified processed dataset + stats
-python -m src.build_dataset --datasets cord naf publaynet textocr synslides --limit 1500
+python -m src.build_dataset --datasets cord naf publaynet textocr bstd doclaynet nvidia_multilingual --limit 20000
 ```
 
-`--limit` caps how many *processed* images are kept per dataset — start small
-(e.g. 500) to sanity check the pipeline, then raise it or drop the flag for a
-full run once you're happy with the output.
+`--limit` caps how many *processed* images are kept per dataset. Shuffle is on by default so samples are drawn from across each dataset rather than the first N in file order.
 
 **By default `--limit` does not shuffle** — it takes the first N samples in
 whatever order each dataset's `iter_samples()` yields them, which for e.g.
@@ -100,6 +98,21 @@ from it fairly — cheap for already-downloaded local data, but for a streamed
 dataset (publaynet) it means pulling the whole remote stream over the network
 just to end up keeping `limit` of them. Fine at these dataset sizes, just
 don't expect it to be instant.
+
+## Cleaning the processed dataset
+
+After building, run the cleaner to remove samples where the stored mask and
+EasyOCR's CRAFT detector disagree significantly:
+
+```bash
+pip install easyocr
+
+# dry run first to see what would be deleted
+python -m scripts.clean_dataset --gpu --min-iou 0.9 --dry-run
+
+# delete for real
+python3 -m scripts.clean_dataset --gpu --min-iou 0.9
+```
 
 ## Mask granularity & known limitations
 
