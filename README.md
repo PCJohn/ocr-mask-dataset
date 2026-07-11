@@ -67,52 +67,72 @@ the image resolution (nearest-neighbor, since it's a binary mask). See
 
 ## Quickstart
 
+Everything below is designed to be run top-to-bottom after a fresh clone.
+Copy-paste each block in order.
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
+# 1. Environment
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-
-# One script downloads everything that needs a pre-download step
-# (publaynet is streamed on demand, it isn't included here)
-python -m src.download_all
-# or a subset:
-python -m src.download_all --datasets cord naf   # skip the ~6.5GB textocr zip
-
-# Build the unified processed dataset + stats
-python -m src.build_dataset --datasets cord naf publaynet textocr bstd doclaynet nvidia_multilingual --limit 20000
+python -m playwright install chromium   # one-time: downloads headless browser for Wikipedia mining
 ```
-
-`--limit` caps how many *processed* images are kept per dataset. Shuffle is on by default so samples are drawn from across each dataset rather than the first N in file order.
-
-**By default `--limit` does not shuffle** — it takes the first N samples in
-whatever order each dataset's `iter_samples()` yields them, which for e.g.
-CORD means "the first N receipts in the train split," not a random spread.
-Pass `--shuffle` to get a uniform random sample instead (reservoir sampling,
-one pass over the data, seeded via `--seed`, default 42):
 
 ```bash
-python -m src.build_dataset --datasets cord naf publaynet textocr synslides --limit 500 --shuffle
+# 2. Download pre-labeled datasets
+python -m src.download_all   # CORD + NAF + TextOCR (~8GB) + SynSlides
+# TextOCR is ~6.5GB; skip it with: --datasets cord naf synslides
 ```
-
-Note `--shuffle` still walks the *entire* underlying dataset once to sample
-from it fairly — cheap for already-downloaded local data, but for a streamed
-dataset (publaynet) it means pulling the whole remote stream over the network
-just to end up keeping `limit` of them. Fine at these dataset sizes, just
-don't expect it to be instant.
-
-## Cleaning the processed dataset
-
-After building, run the cleaner to remove samples where the stored mask and
-EasyOCR's CRAFT detector disagree significantly:
 
 ```bash
-pip install easyocr
-
-# dry run first to see what would be deleted
-python -m scripts.clean_dataset --gpu --min-iou 0.9 --dry-run
-
-# delete for real
-python3 -m scripts.clean_dataset --gpu --min-iou 0.9
+# 3. Build unified processed dataset (images + binary masks + stats)
+#    Shuffle is on by default so you get a representative spread from each dataset.
+python -m src.build_dataset \
+    --datasets cord naf publaynet textocr bstd doclaynet nvidia_multilingual \
+    --limit 20000
 ```
+
+```bash
+# 4. Mine additional masks from free online sources
+#    Each command is independent — run whichever you want.
+pip install easyocr   # one-time: OCR backend used for Wikipedia/YouTube sources
+
+python -m scripts.mine_masks --sources arxiv      --n 100   # arXiv PDFs (exact PDF text layer)
+python -m scripts.mine_masks --sources wikipedia  --n 100   # Wikipedia screenshots, 54 languages
+python -m scripts.mine_masks --sources synthetic  --n 100   # Pillow-rendered text, varied fonts
+python -m scripts.mine_masks --sources pubmed     --n 100   # PubMed Central OA PDFs
+python -m scripts.mine_masks --sources gutenberg  --n 100   # Project Gutenberg books
+python -m scripts.mine_masks --sources openalex   --n 100   # OpenAlex OA PDFs across disciplines
+
+# YouTube: provide your own channel or video URLs
+python -m scripts.mine_masks --sources youtube --n 100 \
+    --youtube-urls https://www.youtube.com/@3blue1brown \
+                   https://www.youtube.com/@lexfridman \
+                   https://www.youtube.com/@TED
+
+# Mine masks from your own local images (photos, screenshots, etc.)
+python -m scripts.mine_masks --sources local \
+    --local-dir /path/to/your/images \
+    --dataset-name my_images \
+    --n 100
+```
+
+```bash
+# 5. Clean: remove samples where mask quality is poor
+#    Corrupt files are always removed (Pass 0). Pass 1 uses EasyOCR's CRAFT
+#    detector to verify mask coverage — delete if IoU < threshold.
+python -m scripts.clean_dataset --gpu --min-iou 0.9 --dry-run   # preview first
+python -m scripts.clean_dataset --gpu --min-iou 0.9              # delete for real
+```
+
+```bash
+# 6. Browse and manually review samples
+python visualize.py                          # all datasets, shuffled
+python visualize.py --datasets cord naf      # filter to specific datasets
+```
+
+`--limit` caps how many processed images are kept per dataset. Shuffle is on
+by default so samples are drawn from across each dataset rather than the first
+N in file order. Pass `--no-shuffle` to disable.
 
 ## Mask granularity & known limitations
 
