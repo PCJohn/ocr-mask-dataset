@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.common import read_jsonl
 from scripts.ocr_backend import (
     get_reader,
-    detect_boxes,
+    _detect_raw,
     polys_to_mask,
     mask_iou,
     _resize_for_ocr,
@@ -137,14 +137,8 @@ def _score_sample(
 
         stored_mask = _load_mask_at_ocr_size(mask_path, (ocr_w, ocr_h))
 
-        polys, _ = (
-            detect_boxes.__wrapped__(
-                arr, scale, reader, text_threshold, low_text, link_threshold
-            )
-            if hasattr(detect_boxes, "__wrapped__")
-            else _detect_raw(
-                arr, scale, reader, text_threshold, low_text, link_threshold
-            )
+        polys, _ = _detect_raw(
+            arr, scale, reader, text_threshold, low_text, link_threshold
         )
 
         det_mask = polys_to_mask(polys, (ocr_w, ocr_h))
@@ -153,37 +147,6 @@ def _score_sample(
         return iou
     except Exception as e:
         return None
-
-
-def _detect_raw(arr, scale, reader, text_threshold, low_text, link_threshold):
-    """Inline detection to avoid re-resizing (arr already at OCR size)."""
-    polys = []
-    try:
-        result = reader.detect(
-            arr,
-            text_threshold=text_threshold,
-            low_text=low_text,
-            link_threshold=link_threshold,
-        )
-        if result and len(result) >= 2:
-            free_boxes = result[1]
-            horiz_boxes = result[0]
-            boxes = free_boxes[0] if free_boxes and free_boxes[0] else None
-            if boxes is None and horiz_boxes and horiz_boxes[0]:
-                for b in horiz_boxes[0]:
-                    x0, x1, y0, y1 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
-                    polys.append(
-                        np.array(
-                            [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=np.float32
-                        )
-                        / scale
-                    )
-            elif boxes:
-                for b in boxes:
-                    polys.append(np.array(b, dtype=np.float32) / scale)
-    except Exception:
-        pass
-    return polys, scale
 
 
 # ── checkpoint / manifest ────────────────────────────────────────────────────
