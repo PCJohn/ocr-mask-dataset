@@ -46,7 +46,7 @@ from typing import Iterator
 
 import numpy as np
 import requests
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.common import (
@@ -1298,6 +1298,99 @@ def source_openalex(
     print(f"[openalex] done: {yielded} pages")
 
 
+# ── Source: local folder ──────────────────────────────────────────────────────
+
+_LOCAL_EXTS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".webp",
+    ".avif",
+    ".heif",
+    ".heic",
+    ".jfif",
+}
+
+
+def source_local(
+    n: int,
+    reader,
+    text_threshold: float,
+    out_dir: Path,
+    meta_rows: list,
+    dry_run: bool,
+    local_dir: str = None,
+    dataset_name: str = "mined_local",
+    recursive: bool = True,
+):
+    """Mine masks from a local folder of images you manually sourced.
+
+    Walks `local_dir`, picks up to `n` images (shuffled), runs CRAFT on each
+    to detect text, and writes to data/processed/<dataset_name>/ in the
+    same unified format as every other source.
+
+    Use this for:
+      - Screenshots you took yourself
+      - Photos of lecture boards, signage, receipts, etc.
+      - Any images you have rights to use but that don't come from an automated source
+    """
+    if not local_dir:
+        print("[local] --local-dir not specified, skipping.")
+        return
+
+    local_path = Path(local_dir)
+    if not local_path.exists():
+        print(f"[local] directory not found: {local_dir}")
+        return
+
+    # find all images
+    if recursive:
+        all_imgs = [p for p in local_path.rglob("*") if p.suffix.lower() in _LOCAL_EXTS]
+    else:
+        all_imgs = [p for p in local_path.iterdir() if p.suffix.lower() in _LOCAL_EXTS]
+
+    if not all_imgs:
+        print(f"[local] no images found in {local_dir}")
+        return
+
+    random.shuffle(all_imgs)
+    to_process = all_imgs[:n]
+    print(
+        f"\n[local] Processing {len(to_process)} images from {local_dir} "
+        f"(found {len(all_imgs)} total, dataset_name='{dataset_name}')..."
+    )
+
+    yielded = 0
+    for img_path in to_process:
+        try:
+            print(
+                f"  [{yielded+1}/{len(to_process)}] {img_path.name}...",
+                end=" ",
+                flush=True,
+            )
+            img = Image.open(img_path).convert("RGB")
+            img = ImageOps.exif_transpose(img)  # handle EXIF rotation for phone photos
+            arr, scale = _resize_for_ocr(img)
+            ocr_polys = []
+            for tt, lt, lk in [(0.3, 0.3, 0.3), (0.2, 0.2, 0.2), (0.1, 0.1, 0.15)]:
+                ocr_polys, _ = _detect_raw(arr, scale, reader, tt, lt, lk)
+                if len(ocr_polys) >= 3:
+                    break
+            del arr
+
+            sample_id = img_path.stem[:60].replace(" ", "_")
+            _save(img, ocr_polys, out_dir, dataset_name, sample_id, meta_rows, dry_run)
+            print(f"✓ {len(ocr_polys)} boxes", flush=True)
+            yielded += 1
+        except Exception as e:
+            print(f"✗ {e}", flush=True)
+
+    print(f"[local] done: {yielded} images")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 ALL_SOURCES = [
@@ -1308,6 +1401,7 @@ ALL_SOURCES = [
     "pubmed",
     "gutenberg",
     "openalex",
+    "local",
 ]
 
 
@@ -1410,6 +1504,21 @@ def main():
         help="Wikipedia language codes to sample (default: broad multilingual set)",
     )
     ap.add_argument(
+        "--local-dir",
+        default=None,
+        help="path to a local folder of images for --sources local",
+    )
+    ap.add_argument(
+        "--dataset-name",
+        default="mined_local",
+        help="dataset name used as subfolder for --sources local (default: mined_local)",
+    )
+    ap.add_argument(
+        "--no-recursive",
+        action="store_true",
+        help="don't recurse into subdirectories for --sources local",
+    )
+    ap.add_argument(
         "--dry-run",
         action="store_true",
         help="run OCR and print stats without writing output",
@@ -1461,6 +1570,17 @@ def main():
         ),
         "openalex": lambda: source_openalex(
             args.n, reader, args.text_threshold, out_dir, meta_rows, args.dry_run
+        ),
+        "local": lambda: source_local(
+            args.n,
+            reader,
+            args.text_threshold,
+            out_dir,
+            meta_rows,
+            args.dry_run,
+            local_dir=args.local_dir,
+            dataset_name=args.dataset_name,
+            recursive=not args.no_recursive,
         ),
     }
 

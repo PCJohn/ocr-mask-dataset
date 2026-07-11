@@ -1,6 +1,6 @@
 numpy
 opencv-python-headless
-Pillow
+Pillow>=10.1.0   # >=10.1 required for built-in AVIF support (avif, heif inputs)
 requests
 tqdm
 datasets>=2.14.0
