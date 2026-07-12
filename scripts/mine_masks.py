@@ -458,6 +458,11 @@ def source_wikipedia(
 # ── Source: YouTube frames ────────────────────────────────────────────────────
 
 
+def _is_rate_limited(err_str: str) -> bool:
+    s = err_str.lower()
+    return "rate-limit" in s or "rate limit" in s or "ratelimit" in s
+
+
 def source_youtube(
     n: int,
     reader,
@@ -466,14 +471,20 @@ def source_youtube(
     meta_rows: list,
     dry_run: bool,
     youtube_urls: list = None,
+    videos_per_channel: int = 5,
 ):
-    """Sample frames from YouTube videos using yt-dlp (no API key needed)."""
+    """Sample frames from YouTube videos using yt-dlp.
+
+    Downloads only a 30s clip per video using download_ranges.
+    Pools all frames, subsamples, then runs CRAFT on the subsampled set.
+    Handles YouTube rate-limiting with automatic 90s pause + retry.
+    """
     try:
         import yt_dlp
     except ImportError:
         print("[youtube] yt-dlp not installed. Run: pip install yt-dlp")
         return
-    import subprocess, shutil
+    import subprocess, shutil, io as _io, contextlib
 
     if not youtube_urls:
         print("[youtube] No --youtube-urls provided, skipping.")
@@ -482,80 +493,182 @@ def source_youtube(
         print("[youtube] ffmpeg not found in PATH. Install ffmpeg to extract frames.")
         return
 
-    print(f"\n[youtube] Mining {n} frames from {len(youtube_urls)} URL(s)...")
+    frames_per_channel = max(1, n // max(len(youtube_urls), 1))
+    print(
+        f"\n[youtube] Mining {n} frames from {len(youtube_urls)} channel(s) "
+        f"({videos_per_channel} videos/channel, {frames_per_channel} frames/channel)...",
+        flush=True,
+    )
     yielded = 0
-    frames_per_video = max(1, n // max(len(youtube_urls), 1))
 
-    for url in youtube_urls:
+    import shutil as _shutil
+
+    _node = _shutil.which("node") or "node"
+
+    BASE_OPTS = {
+        "ignoreerrors": True,
+        "sleep_interval": 3,
+        "max_sleep_interval": 8,
+        "sleep_interval_requests": 2,
+        "js_runtimes": {"node": {"path": _node}},
+    }
+
+    def _resolve(url, items):
+        buf = _io.StringIO()
+        opts = {
+            **BASE_OPTS,
+            "quiet": True,
+            "extract_flat": True,
+            "playlist_items": items,
+        }
+        with contextlib.redirect_stderr(buf):
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        if _is_rate_limited(buf.getvalue()):
+            raise RuntimeError("rate-limited")
+        entries = (info or {}).get("entries") or [info]
+        return [
+            (
+                e.get("url") or e.get("webpage_url") or e.get("id"),
+                e.get("duration") or 0,
+            )
+            for e in (entries or [])
+            if e
+            if e.get("url") or e.get("webpage_url") or e.get("id")
+        ]
+
+    for ch_idx, url in enumerate(youtube_urls):
         if yielded >= n:
             break
+        chan_name = url.split("@")[-1][:25].replace("/", "_")
         try:
-            # resolve channel/playlist to individual video URLs
-            ydl_opts_list = {
-                "quiet": True,
-                "extract_flat": True,
-                "playlistend": 20,
-                "ignoreerrors": True,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts_list) as ydl:
-                info = ydl.extract_info(url, download=False)
-            entries = info.get("entries") or [info]
-            videos = [
-                e.get("url") or e.get("webpage_url") or e.get("id")
-                for e in entries
-                if e
-            ]
-            videos = [v for v in videos if v]
-            random.shuffle(videos)
-
-            for vid_url in videos:
-                if yielded >= n:
+            # resolve random video window with one rate-limit retry
+            start = random.randint(1, 300)
+            end = start + videos_per_channel - 1
+            videos = []
+            for attempt in range(2):
+                try:
+                    videos = _resolve(url, f"{start}-{end}") or _resolve(
+                        url, f"1-{videos_per_channel}"
+                    )
                     break
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    frame_path = os.path.join(tmpdir, "frame_%04d.jpg")
-                    # download a 30-second random clip and extract frames at 1fps
-                    ydl_opts = {
-                        "quiet": True,
-                        "outtmpl": os.path.join(tmpdir, "vid.%(ext)s"),
-                        "format": "bestvideo[height<=480][ext=mp4]/best[height<=480]",
-                        "external_downloader": "ffmpeg",
-                        "external_downloader_args": {"ffmpeg_i": ["-t", "30"]},
-                        "ignoreerrors": True,
-                    }
+                except RuntimeError:
+                    if attempt == 0:
+                        print(
+                            f"  [youtube] {chan_name}: rate-limited, waiting 90s...",
+                            flush=True,
+                        )
+                        time.sleep(90)
+                    else:
+                        print(
+                            f"  [youtube] {chan_name}: still rate-limited, skipping.",
+                            flush=True,
+                        )
+
+            if not videos:
+                continue
+
+            print(
+                f"  [youtube] {chan_name}: {len(videos)} videos, downloading clips...",
+                flush=True,
+            )
+
+            frame_pool_dir = tempfile.mkdtemp()
+            all_frame_files: list = []
+            rate_limited = False
+
+            try:
+                for vi, (vid_url, duration) in enumerate(videos):
+                    if rate_limited:
+                        break
                     try:
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            ydl.download([vid_url])
+                        clip_start = (
+                            random.randint(30, max(30, int(duration) - 90))
+                            if duration > 120
+                            else int(duration * 0.3) if duration > 60 else 0
+                        )
+                        clip_end = clip_start + 30
+                        vid_tmp = tempfile.mkdtemp(dir=frame_pool_dir)
+                        ydl_opts = {
+                            **BASE_OPTS,
+                            "quiet": True,
+                            "outtmpl": os.path.join(vid_tmp, "vid.%(ext)s"),
+                            "format": "worst[height>=144]/worst",
+                            "noplaylist": True,
+                            "download_ranges": yt_dlp.utils.download_range_func(
+                                None, [(clip_start, clip_end)]
+                            ),
+                            "force_keyframes_at_cuts": True,
+                        }
+                        buf = _io.StringIO()
+                        with contextlib.redirect_stderr(buf):
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                ydl.download([vid_url])
+                        if _is_rate_limited(buf.getvalue()):
+                            print(
+                                f"    {vi+1}/{len(videos)}: rate-limited, pausing 90s...",
+                                flush=True,
+                            )
+                            time.sleep(90)
+                            rate_limited = True
+                            break
+
                         vid_files = [
-                            f for f in os.listdir(tmpdir) if f.startswith("vid.")
+                            f for f in os.listdir(vid_tmp) if f.startswith("vid.")
                         ]
                         if not vid_files:
                             continue
-                        vid_file = os.path.join(tmpdir, vid_files[0])
-                        # extract 1 frame per second
+                        frame_prefix = os.path.join(vid_tmp, f"f{vi}_%04d.jpg")
                         subprocess.run(
                             [
                                 "ffmpeg",
                                 "-i",
-                                vid_file,
+                                os.path.join(vid_tmp, vid_files[0]),
                                 "-vf",
-                                "fps=1",
-                                frame_path,
+                                "fps=2",
+                                "-q:v",
+                                "3",
+                                frame_prefix,
                                 "-loglevel",
                                 "error",
                             ],
-                            check=True,
                             capture_output=True,
+                            timeout=60,
                         )
-                        frame_files = sorted(Path(tmpdir).glob("frame_*.jpg"))
-                        random.shuffle(frame_files)
-                        vid_id = (
-                            vid_url.split("=")[-1][:12]
-                            if "=" in vid_url
-                            else vid_url[-12:]
+                        frames = sorted(Path(vid_tmp).glob(f"f{vi}_*.jpg"))
+                        all_frame_files.extend(frames)
+                        print(
+                            f"    {vi+1}/{len(videos)}: {len(frames)} frames ({clip_start}-{clip_end}s)",
+                            flush=True,
                         )
-                        for i, f in enumerate(frame_files[:frames_per_video]):
-                            if yielded >= n:
-                                break
+                        if vi < len(videos) - 1:
+                            time.sleep(random.uniform(5, 12))
+
+                    except subprocess.TimeoutExpired:
+                        print(f"    {vi+1}/{len(videos)}: ffmpeg timed out", flush=True)
+                    except Exception as e:
+                        err = str(e)
+                        if _is_rate_limited(err):
+                            print(
+                                f"    {vi+1}/{len(videos)}: rate-limited, pausing 90s...",
+                                flush=True,
+                            )
+                            time.sleep(90)
+                            rate_limited = True
+                            break
+                        print(f"    {vi+1}/{len(videos)}: {e}", flush=True)
+
+                if all_frame_files:
+                    random.shuffle(all_frame_files)
+                    selected = all_frame_files[:frames_per_channel]
+                    print(
+                        f"  [youtube] {len(all_frame_files)} frames → {len(selected)} → CRAFT...",
+                        flush=True,
+                    )
+                    for i, f in enumerate(selected):
+                        if yielded >= n:
+                            break
+                        try:
                             pil_img = Image.open(f).convert("RGB")
                             arr, scale = _resize_for_ocr(pil_img)
                             ocr_polys = []
@@ -567,24 +680,38 @@ def source_youtube(
                                 ocr_polys, _ = _detect_raw(
                                     arr, scale, reader, tt, lt, lk
                                 )
-                                if len(ocr_polys) >= 5:
+                                if len(ocr_polys) >= 3:
                                     break
                             del arr
-                            sample_id = f"yt_{vid_id}_{i:04d}"
                             _save(
                                 pil_img,
                                 ocr_polys,
                                 out_dir,
                                 "mined_youtube",
-                                sample_id,
+                                f"yt_{chan_name}_{yielded:04d}",
                                 meta_rows,
                                 dry_run,
                             )
+                            print(
+                                f"    [{i+1}/{len(selected)}] ✓ {len(ocr_polys)} boxes",
+                                flush=True,
+                            )
                             yielded += 1
-                    except Exception as e:
-                        print(f"  [youtube] {vid_url}: {e}")
+                        except Exception as e:
+                            print(f"    frame {i}: {e}", flush=True)
+            finally:
+                _shutil.rmtree(frame_pool_dir, ignore_errors=True)
+
+            if ch_idx < len(youtube_urls) - 1:
+                sleep_t = random.uniform(10, 20)
+                print(
+                    f"  [youtube] sleeping {sleep_t:.0f}s before next channel...",
+                    flush=True,
+                )
+                time.sleep(sleep_t)
+
         except Exception as e:
-            print(f"  [youtube] {url}: {e}")
+            print(f"  [youtube] {chan_name}: {e}", flush=True)
 
     print(f"[youtube] done: {yielded} frames")
 
@@ -1514,6 +1641,12 @@ def main():
         help="YouTube channel or video URLs for --source youtube",
     )
     ap.add_argument(
+        "--youtube-videos-per-channel",
+        type=int,
+        default=5,
+        help="number of random videos to sample per channel URL (default: 5)",
+    )
+    ap.add_argument(
         "--wiki-langs",
         nargs="*",
         default=[
@@ -1633,6 +1766,7 @@ def main():
             meta_rows,
             args.dry_run,
             youtube_urls=args.youtube_urls,
+            videos_per_channel=args.youtube_videos_per_channel,
         ),
         "synthetic": lambda: source_synthetic(
             args.n, reader, args.text_threshold, out_dir, meta_rows, args.dry_run
