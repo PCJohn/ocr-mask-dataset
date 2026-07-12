@@ -57,11 +57,55 @@ def _flush_gpu():
     gc.collect()
 
 
+# ── Pass 0a: deduplication (CPU, no OCR, no disk I/O beyond manifest) ─────────
+
+
+def _dedup_check(records, processed_dir, decisions, dry_run):
+    """Flag duplicate manifest entries by image_path.
+
+    Two records are duplicates if they point to the same image file path
+    within their dataset folder. The first occurrence is kept; all subsequent
+    ones are flagged as 'duplicate' and their files deleted.
+
+    File names are stable (we never rename processed files), so path
+    comparison is sufficient without hashing file contents.
+    """
+    print("\nPass 0a: deduplication check...")
+    seen_paths: set[str] = set()
+    n = 0
+    for rec in tqdm(records, desc="dedup"):
+        if rec["id"] in decisions:
+            continue
+        ds = rec["dataset"]
+        img_rel = rec["image_path"]
+        # canonical key: dataset + relative image path
+        key = f"{ds}/{img_rel}"
+        if key in seen_paths:
+            decisions[rec["id"]] = "duplicate"
+            n += 1
+            if not dry_run:
+                base = os.path.join(processed_dir, ds)
+                for field in ("image_path", "mask_path"):
+                    fpath = os.path.join(base, rec[field])
+                    try:
+                        os.remove(fpath)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as e:
+                        print(f"  Warning: could not delete {fpath}: {e}")
+        else:
+            seen_paths.add(key)
+
+    suffix = " (dry-run)" if dry_run else " — files deleted from data/processed/"
+    print(f"  {n} duplicate samples{suffix}")
+    return n
+
+
 # ── Pass 0: corruption (CPU, no OCR) ─────────────────────────────────────────
 
 
 def _corruption_check(records, processed_dir, decisions, dry_run):
-    print("\nPass 0: corruption check (CPU, no OCR)...")
+    print("\nPass 0b: corruption + empty-mask check (CPU, no OCR)...")
     n = 0
     for rec in tqdm(records, desc="corruption check"):
         if rec["id"] in decisions:
@@ -93,6 +137,10 @@ def _corruption_check(records, processed_dir, decisions, dry_run):
                     m = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
                     if m is None or m.size == 0:
                         reason = "corrupt-bad-mask"
+                    elif m.max() == 0:
+                        # All-black mask: no text was detected at all.
+                        # These are useless for training a text segmentation model.
+                        reason = "empty-mask"
                 except Exception:
                     reason = "corrupt-bad-mask"
 
@@ -113,7 +161,7 @@ def _corruption_check(records, processed_dir, decisions, dry_run):
         if dry_run
         else f" — image + mask files deleted from data/processed/"
     )
-    print(f"  {n} corrupt samples{suffix}")
+    print(f"  {n} corrupt/empty-mask samples{suffix}")
     return n
 
 
@@ -257,7 +305,11 @@ def main():
     if decisions:
         print(f"Resuming: {len(decisions)} already decided")
 
-    # Pass 0: corruption
+    # ── Pass 0a: deduplication ────────────────────────────────────────────────
+    _dedup_check(records, args.processed, decisions, args.dry_run)
+    _save_ckpt(ckpt, decisions)
+
+    # ── Pass 0b: corruption + empty-mask ─────────────────────────────────────
     _corruption_check(records, args.processed, decisions, args.dry_run)
     _save_ckpt(ckpt, decisions)
 
@@ -295,9 +347,8 @@ def main():
     for rec in records:
         decisions.setdefault(rec["id"], "ok")
 
-    # Pass 2: delete low-iou/error files and write report
-    # Note: corrupt files were already deleted during Pass 0.
-    # This pass handles low-iou and error verdicts only.
+    # Pass 2: delete low-iou/error files and write report.
+    # duplicate, empty-mask, and corrupt files already deleted in Pass 0a/0b.
     counts: dict[str, int] = {}
     report_rows = []
     n_deleted_files = 0
@@ -308,15 +359,23 @@ def main():
             "ok"
             if v == "ok"
             else (
-                "corrupt"
-                if v.startswith("corrupt")
-                else "low-iou" if v.startswith("low-iou") else v
+                "duplicate"
+                if v == "duplicate"
+                else (
+                    "empty-mask"
+                    if v == "empty-mask"
+                    else (
+                        "corrupt"
+                        if v.startswith("corrupt")
+                        else "low-iou" if v.startswith("low-iou") else v
+                    )
+                )
             )
         )
         counts[bucket] = counts.get(bucket, 0) + 1
         report_rows.append({"id": rec["id"], "dataset": rec["dataset"], "result": v})
 
-        # Only delete here for non-corrupt verdicts (corrupt files deleted in Pass 0)
+        # Only delete files here for OCR-verdict failures (others already deleted)
         if bucket in ("low-iou", "error") and not args.dry_run:
             ds = rec["dataset"]
             base = os.path.join(args.processed, ds)
@@ -326,7 +385,7 @@ def main():
                     os.remove(fpath)
                     n_deleted_files += 1
                 except FileNotFoundError:
-                    pass  # already gone (shouldn't happen for low-iou, but be safe)
+                    pass
                 except OSError as e:
                     print(f"  Warning: could not delete {fpath}: {e}")
 
@@ -352,11 +411,13 @@ def main():
 
     mode = "[DRY RUN] " if args.dry_run else ""
     print(f"\n{mode}Results:")
-    print(f"  kept:    {counts.get('ok', 0)}")
-    print(f"  low-iou: {counts.get('low-iou', 0)}")
-    print(f"  corrupt: {counts.get('corrupt', 0)}")
-    print(f"  error:   {counts.get('error', 0)}")
-    print(f"  report:  {args.report}")
+    print(f"  kept:        {counts.get('ok', 0)}")
+    print(f"  duplicates:  {counts.get('duplicate', 0)}")
+    print(f"  empty-mask:  {counts.get('empty-mask', 0)}")
+    print(f"  low-iou:     {counts.get('low-iou', 0)}")
+    print(f"  corrupt:     {counts.get('corrupt', 0)}")
+    print(f"  error:       {counts.get('error', 0)}")
+    print(f"  report:      {args.report}")
 
 
 if __name__ == "__main__":
