@@ -75,6 +75,12 @@ Copy-paste each block in order.
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python -m playwright install chromium   # one-time: downloads headless browser for Wikipedia mining
+
+# YouTube only: install Node.js ≥ 20 (yt-dlp JS runtime requirement)
+#   Windows: winget install OpenJS.NodeJS.LTS
+#   Mac:     brew install node
+#   Linux:   nvm install 20
+pip install "yt-dlp[default]"   # installs yt_dlp_ejs JS bridge package
 ```
 
 ```bash
@@ -96,32 +102,45 @@ python -m src.build_dataset \
 #    Each command is independent — run whichever you want.
 pip install easyocr   # one-time: OCR backend used for Wikipedia/YouTube sources
 
-python -m scripts.mine_masks --sources arxiv      --n 100   # arXiv PDFs (exact PDF text layer)
-python -m scripts.mine_masks --sources wikipedia  --n 100   # Wikipedia screenshots, 54 languages
-python -m scripts.mine_masks --sources synthetic  --n 100   # Pillow-rendered text, varied fonts
-python -m scripts.mine_masks --sources pubmed     --n 100   # PubMed Central OA PDFs
-python -m scripts.mine_masks --sources gutenberg  --n 100   # Project Gutenberg books
-python -m scripts.mine_masks --sources openalex   --n 100   # OpenAlex OA PDFs across disciplines
+python -m scripts.mine_masks --gpu --sources arxiv      --n 100   # arXiv PDFs (exact PDF text layer)
+python -m scripts.mine_masks --gpu --sources wikipedia  --n 100   # Wikipedia screenshots, 54 languages
+python -m scripts.mine_masks --gpu --sources synthetic  --n 100   # Pillow-rendered text, varied fonts
+python -m scripts.mine_masks --gpu --sources pubmed     --n 100   # PubMed Central OA PDFs
+python -m scripts.mine_masks --gpu --sources gutenberg  --n 100   # Project Gutenberg books
+python -m scripts.mine_masks --gpu --sources openalex   --n 100   # OpenAlex OA PDFs across disciplines
 
-# YouTube: provide your own channel or video URLs
-python -m scripts.mine_masks --sources youtube --n 100 \
-    --youtube-urls https://www.youtube.com/@3blue1brown \
-                   https://www.youtube.com/@lexfridman \
-                   https://www.youtube.com/@TED
+# YouTube: samples random videos from each channel, downloads only 30s clips,
+#          pools frames across all videos then subsamples before running CRAFT.
+#          --youtube-videos-per-channel controls how many videos to sample per channel.
+#          Add/remove channel URLs to taste.
+python -m scripts.mine_masks --gpu --sources youtube \
+    --n 100 \
+    --youtube-videos-per-channel 5 \
+    --youtube-urls \
+        https://www.youtube.com/@3blue1brown \
+        https://www.youtube.com/@mitocw \
+        https://www.youtube.com/@YaleCourses \
+        https://www.youtube.com/@OxfordMathematics \
+        https://www.youtube.com/@SimonsInstitute \
+        https://www.youtube.com/@IITBombayJuly \
+        https://www.youtube.com/@ColdFusion \
+        https://www.youtube.com/@TheB1M \
+        https://www.youtube.com/@CNBCtelevision \
+        https://www.youtube.com/@JustJoshTech
 
 # Mine masks from your own local images (photos, screenshots, etc.)
-python -m scripts.mine_masks --sources local \
+# Supports JPG, PNG, WebP, AVIF, HEIC and more.
+python -m scripts.mine_masks --gpu --sources local \
     --local-dir /path/to/your/images \
     --dataset-name my_images \
     --n 100
 ```
 
 ```bash
-# 5. Clean: remove samples where mask quality is poor
-#    Corrupt files are always removed (Pass 0). Pass 1 uses EasyOCR's CRAFT
-#    detector to verify mask coverage — delete if IoU < threshold.
-python -m scripts.clean_dataset --gpu --min-iou 0.9 --dry-run   # preview first
-python -m scripts.clean_dataset --gpu --min-iou 0.9              # delete for real
+# 5. Clean: remove duplicates, empty masks, corrupt files, and samples where
+#    the stored mask and EasyOCR's CRAFT detector disagree (IoU < threshold).
+python -m scripts.clean_dataset --gpu --min-iou 0.15 --dry-run   # preview first
+python -m scripts.clean_dataset --gpu --min-iou 0.15              # delete for real
 ```
 
 ```bash
@@ -133,6 +152,8 @@ python visualize.py --datasets cord naf      # filter to specific datasets
 `--limit` caps how many processed images are kept per dataset. Shuffle is on
 by default so samples are drawn from across each dataset rather than the first
 N in file order. Pass `--no-shuffle` to disable.
+
+Drop `--gpu` if you don't have a CUDA GPU — everything runs on CPU, just slower.
 
 ## Mask granularity & known limitations
 
