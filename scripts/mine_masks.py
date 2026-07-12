@@ -1315,6 +1315,72 @@ _LOCAL_EXTS = {
 }
 
 
+def _craft_params_for_image(img: "Image.Image") -> list[tuple]:
+    """Pick CRAFT threshold strategies based on image characteristics.
+
+    Returns a list of (text_threshold, low_text, link_threshold) tuples to try
+    in sequence, stopping when enough boxes are found.
+
+    Different image types need very different thresholds:
+      - Clean printed text on white: default (0.7, 0.4, 0.4) works fine
+      - Low contrast (dark bg, coloured ink, holographic): needs much lower
+      - Dense small text (posters, cards): needs lower link_threshold to
+        separate adjacent words
+      - Handwriting: needs lower text_threshold since strokes are thin/irregular
+    """
+    import numpy as np
+
+    arr = np.array(img.convert("RGB"))
+    h, w = arr.shape[:2]
+
+    # Estimate background brightness (sample border pixels)
+    border = np.concatenate(
+        [
+            arr[:20, :].reshape(-1, 3),
+            arr[-20:, :].reshape(-1, 3),
+            arr[:, :20].reshape(-1, 3),
+            arr[:, -20:].reshape(-1, 3),
+        ]
+    )
+    bg_brightness = float(border.mean())
+
+    # Estimate overall contrast (std of grayscale)
+    gray = arr.mean(axis=2)
+    contrast = float(gray.std())
+
+    # Dark background (album cover, dark slides) — very low thresholds
+    if bg_brightness < 80:
+        return [
+            (0.2, 0.2, 0.3),
+            (0.1, 0.1, 0.2),
+            (0.05, 0.05, 0.1),
+        ]
+
+    # Low contrast (holographic cards, watermarked paper, patterned backgrounds)
+    if contrast < 35:
+        return [
+            (0.3, 0.3, 0.4),
+            (0.15, 0.15, 0.3),
+            (0.05, 0.05, 0.1),
+        ]
+
+    # Dense small text (posters, invoices, dense documents)
+    # Keep link_threshold low to avoid merging words but catch small chars
+    if w * h > 1500 * 1000:  # large high-res image = likely poster/document
+        return [
+            (0.4, 0.3, 0.3),
+            (0.25, 0.2, 0.2),
+            (0.1, 0.1, 0.15),
+        ]
+
+    # Standard: clean printed text, slides, cards on light background
+    return [
+        (0.5, 0.3, 0.4),
+        (0.3, 0.2, 0.3),
+        (0.1, 0.1, 0.2),
+    ]
+
+
 def source_local(
     n: int,
     reader,
@@ -1329,13 +1395,12 @@ def source_local(
     """Mine masks from a local folder of images you manually sourced.
 
     Walks `local_dir`, picks up to `n` images (shuffled), runs CRAFT on each
-    to detect text, and writes to data/processed/<dataset_name>/ in the
-    same unified format as every other source.
-
-    Use this for:
-      - Screenshots you took yourself
-      - Photos of lecture boards, signage, receipts, etc.
-      - Any images you have rights to use but that don't come from an automated source
+    with image-adaptive thresholds to handle:
+      - Clean printed text (documents, slides)
+      - Low-contrast text (dark backgrounds, holographic surfaces)
+      - Dense small text (research posters, ID cards)
+      - Handwritten text (notes, annotations)
+      - Non-Latin scripts (Gujarati, Punjabi, Arabic, etc.)
     """
     if not local_dir:
         print("[local] --local-dir not specified, skipping.")
@@ -1346,21 +1411,20 @@ def source_local(
         print(f"[local] directory not found: {local_dir}")
         return
 
-    # find all images
     if recursive:
         all_imgs = [p for p in local_path.rglob("*") if p.suffix.lower() in _LOCAL_EXTS]
     else:
         all_imgs = [p for p in local_path.iterdir() if p.suffix.lower() in _LOCAL_EXTS]
 
     if not all_imgs:
-        print(f"[local] no images found in {local_dir}")
+        print(f"[local] no images found in {local_dir} with extensions {_LOCAL_EXTS}")
         return
 
     random.shuffle(all_imgs)
     to_process = all_imgs[:n]
     print(
         f"\n[local] Processing {len(to_process)} images from {local_dir} "
-        f"(found {len(all_imgs)} total, dataset_name='{dataset_name}')..."
+        f"(found {len(all_imgs)} total) -> dataset '{dataset_name}'"
     )
 
     yielded = 0
@@ -1372,18 +1436,29 @@ def source_local(
                 flush=True,
             )
             img = Image.open(img_path).convert("RGB")
-            img = ImageOps.exif_transpose(img)  # handle EXIF rotation for phone photos
+            img = ImageOps.exif_transpose(img)
+
+            # Pick CRAFT thresholds based on image characteristics
+            strategies = _craft_params_for_image(img)
+
             arr, scale = _resize_for_ocr(img)
             ocr_polys = []
-            for tt, lt, lk in [(0.3, 0.3, 0.3), (0.2, 0.2, 0.2), (0.1, 0.1, 0.15)]:
+            used_strategy = None
+            for tt, lt, lk in strategies:
                 ocr_polys, _ = _detect_raw(arr, scale, reader, tt, lt, lk)
                 if len(ocr_polys) >= 3:
+                    used_strategy = (tt, lt, lk)
                     break
             del arr
 
             sample_id = img_path.stem[:60].replace(" ", "_")
             _save(img, ocr_polys, out_dir, dataset_name, sample_id, meta_rows, dry_run)
-            print(f"✓ {len(ocr_polys)} boxes", flush=True)
+            strat_str = (
+                f"({used_strategy[0]},{used_strategy[1]},{used_strategy[2]})"
+                if used_strategy
+                else "none"
+            )
+            print(f"✓ {len(ocr_polys)} boxes  thresholds={strat_str}", flush=True)
             yielded += 1
         except Exception as e:
             print(f"✗ {e}", flush=True)
