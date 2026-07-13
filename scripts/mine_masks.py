@@ -507,9 +507,6 @@ def source_youtube(
 
     BASE_OPTS = {
         "ignoreerrors": True,
-        "sleep_interval": 3,
-        "max_sleep_interval": 8,
-        "sleep_interval_requests": 2,
         "js_runtimes": {"node": {"path": _node}},
     }
 
